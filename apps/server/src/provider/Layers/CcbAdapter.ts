@@ -41,15 +41,15 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
+import { resolveCcbVendorPath } from "../ccbVendorPath.ts";
 import { CcbAdapter, type CcbAdapterShape } from "../Services/CcbAdapter.ts";
 import { withProviderPlanModePrompt } from "../planMode.ts";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const DEFAULT_CCB_VENDOR_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../../../../CCB-claude-best-t3code",
-);
+const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
+  baseDir: dirname(fileURLToPath(import.meta.url)),
+});
 
 type CcbBridgeModule = {
   createDpcodeCcbSession(input: {

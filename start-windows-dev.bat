@@ -4,6 +4,7 @@ setlocal
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
+set "SERVER_DIR=%ROOT%\apps\server"
 set "WEB_DIR=%ROOT%\apps\web"
 set "DESKTOP_DIR=%ROOT%\apps\desktop"
 set "STATE_DIR=%ROOT%\.dpcode-clean"
@@ -19,6 +20,9 @@ echo State: %STATE_DIR%
 start "DP Code Web" cmd /k "cd /d "%WEB_DIR%" && node node_modules\vite\bin\vite.js --host 127.0.0.1 --port 5733 --strictPort"
 timeout /t 3 /nobreak >nul
 
+start "DP Code Server Bundle" cmd /k "cd /d "%SERVER_DIR%" && bun tsdown --watch"
+timeout /t 3 /nobreak >nul
+
 start "DP Code Desktop Bundle" cmd /k "cd /d "%DESKTOP_DIR%" && bun run dev:bundle"
 timeout /t 3 /nobreak >nul
 
@@ -27,6 +31,7 @@ start "DP Code Desktop App" cmd /k "cd /d "%DESKTOP_DIR%" && set ELECTRON_RENDER
 echo.
 echo Started:
 echo - Web: http://127.0.0.1:5733/
+echo - Server bundle watcher
 echo - Desktop bundle watcher
 echo - Desktop app
 echo.

@@ -9,7 +9,7 @@
  * @module ProviderHealthLive
  */
 import * as OS from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ServerProviderAuthStatus,
@@ -54,6 +54,7 @@ import {
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "../providerStatusCache";
+import { resolveCcbVendorPath } from "../ccbVendorPath";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CCB_PROVIDER = "ccb" as const;
@@ -62,10 +63,9 @@ const CLAUDE_AGENT_PROVIDER = "claudeAgent" as const;
 const GEMINI_PROVIDER = "gemini" as const;
 const OPENCODE_PROVIDER = "opencode" as const;
 type ProviderStatuses = ReadonlyArray<ServerProviderStatus>;
-const DEFAULT_CCB_VENDOR_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../../../../CCB-claude-best-t3code",
-);
+const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
+  baseDir: dirname(fileURLToPath(import.meta.url)),
+});
 
 // ── Pure helpers ────────────────────────────────────────────────────
 
