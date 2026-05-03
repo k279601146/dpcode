@@ -134,6 +134,7 @@ type CcbSessionContext = {
     { readonly itemType: CanonicalItemType; readonly title: string }
   >;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  readonly streamedAssistantTextByTurnId: Map<string, string>;
   activeTurnId: TurnId | undefined;
   streamFiber: Fiber.Fiber<void, ProviderAdapterError> | undefined;
   stopped: boolean;
@@ -211,6 +212,39 @@ function toolResultText(block: Record<string, unknown>): string {
   const content = block.content;
   if (typeof content === "string") return content;
   return contentText(content);
+}
+
+function recordAssistantTextDelta(
+  context: CcbSessionContext,
+  turnId: TurnId,
+  delta: string,
+): void {
+  const key = String(turnId);
+  context.streamedAssistantTextByTurnId.set(
+    key,
+    `${context.streamedAssistantTextByTurnId.get(key) ?? ""}${delta}`,
+  );
+}
+
+function assistantFinalTextDelta(
+  context: CcbSessionContext,
+  turnId: TurnId,
+  finalText: string,
+): string {
+  const streamedText = context.streamedAssistantTextByTurnId.get(String(turnId)) ?? "";
+  if (streamedText.length === 0) {
+    return finalText;
+  }
+  if (finalText === streamedText || finalText.trim() === streamedText.trim()) {
+    return "";
+  }
+  if (finalText.startsWith(streamedText)) {
+    return finalText.slice(streamedText.length);
+  }
+  if (streamedText.endsWith(finalText)) {
+    return "";
+  }
+  return finalText;
 }
 
 function modelFromInput(input: ProviderSendTurnInput): string | undefined {
@@ -600,6 +634,9 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 raw,
                 providerRefs: { providerThreadId: context.handle.sessionId },
               });
+              if (!asString(delta?.type)?.includes("thinking")) {
+                recordAssistantTextDelta(context, turnId, text);
+              }
             }
           }
           return;
@@ -607,24 +644,14 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         if (messageType === "assistant") {
           const content = asArray(asObject(message.message)?.content) ?? [];
+          const finalTextBlocks: string[] = [];
           for (const block of content) {
             const blockObj = asObject(block);
             const blockType = asString(blockObj?.type);
             if (blockType === "text") {
               const text = asString(blockObj?.text) ?? "";
               if (text.length > 0) {
-                const stamp = yield* makeStamp();
-                yield* offer({
-                  type: "content.delta",
-                  eventId: stamp.eventId,
-                  provider: PROVIDER,
-                  threadId: context.session.threadId,
-                  turnId,
-                  createdAt: stamp.createdAt,
-                  payload: { streamKind: "assistant_text", delta: text },
-                  raw,
-                  providerRefs: { providerThreadId: context.handle.sessionId },
-                });
+                finalTextBlocks.push(text);
               }
             } else if (blockType === "thinking") {
               const text = asString(blockObj?.thinking) ?? asString(blockObj?.text) ?? "";
@@ -670,6 +697,23 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 },
               });
             }
+          }
+          const finalText = finalTextBlocks.join("\n");
+          const finalDelta = assistantFinalTextDelta(context, turnId, finalText);
+          if (finalDelta.length > 0) {
+            const stamp = yield* makeStamp();
+            yield* offer({
+              type: "content.delta",
+              eventId: stamp.eventId,
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              turnId,
+              createdAt: stamp.createdAt,
+              payload: { streamKind: "assistant_text", delta: finalDelta },
+              raw,
+              providerRefs: { providerThreadId: context.handle.sessionId },
+            });
+            recordAssistantTextDelta(context, turnId, finalDelta);
           }
           return;
         }
@@ -799,6 +843,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             raw,
             providerRefs: { providerThreadId: context.handle.sessionId },
           });
+          context.streamedAssistantTextByTurnId.delete(String(turnId));
           if (isError) {
             yield* emitRuntimeError(context, asString(message.result) ?? "CCB turn failed", message);
           }
@@ -929,6 +974,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           pendingApprovals,
           pendingToolItems: new Map(),
           turns: [],
+          streamedAssistantTextByTurnId: new Map(),
           activeTurnId: undefined,
           streamFiber: undefined,
           stopped: false,

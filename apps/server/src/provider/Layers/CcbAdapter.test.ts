@@ -286,6 +286,61 @@ layer(
   );
 });
 
+layer(
+  makeFakeBridge([
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: { type: "text_delta", text: "You are 27." },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "You are 27." }],
+      },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+    },
+  ]),
+)("CcbAdapterLive assistant streaming", (it) => {
+  it.effect("does not repeat the final assistant message after streamed deltas", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "content.delta" || event.type === "turn.completed"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-stream-dedup-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "say my age",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const assistantDeltas = events.filter(
+        (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+      );
+      assert.equal(assistantDeltas.length, 1);
+      assert.equal(assistantDeltas[0]?.payload.delta, "You are 27.");
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
 const lifecycleBridge = makeControllableFakeBridge();
 layer(lifecycleBridge)("CcbAdapterLive lifecycle", (it) => {
   it.effect("lists, reads, compacts, interrupts, and stops sessions", () =>
@@ -626,7 +681,7 @@ layer({
       const adapter = yield* CcbAdapter;
       const threadId = ThreadId.makeUnsafe(`thread-ccb-resume-test-${crypto.randomUUID()}`);
       const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type === "turn.completed"),
+        Stream.filter((event) => event.type === "turn.completed" && event.threadId === threadId),
         Stream.take(1),
         Stream.runCollect,
         Effect.forkDetach,
@@ -644,7 +699,9 @@ layer({
       });
       yield* Fiber.join(completedFiber);
 
-      const cursor = (yield* adapter.listSessions())[0]?.resumeCursor;
+      const cursor = (yield* adapter.listSessions()).find(
+        (entry) => entry.threadId === threadId,
+      )?.resumeCursor;
       assert.ok(cursor);
       assert.equal(typeof cursor.transcriptPath, "string");
       yield* Effect.promise(() => waitForTranscript(cursor.transcriptPath as string));
