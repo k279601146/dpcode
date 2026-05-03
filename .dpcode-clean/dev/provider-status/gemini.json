@@ -1,0 +1,8 @@
+{
+  "provider": "gemini",
+  "status": "error",
+  "available": false,
+  "authStatus": "unknown",
+  "checkedAt": "2026-05-03T09:46:56.810Z",
+  "message": "Gemini CLI is installed but failed to run. 'gemini' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���\r\n���������ļ���"
+}
