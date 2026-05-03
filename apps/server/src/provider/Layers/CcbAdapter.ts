@@ -19,6 +19,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type RuntimeContentStreamKind,
   ProviderItemId,
   RuntimeItemId,
   RuntimeRequestId,
@@ -124,15 +125,27 @@ type PendingApproval = {
   readonly promise: Promise<ProviderApprovalDecision>;
 };
 
+type PendingToolItem = {
+  readonly itemType: CanonicalItemType;
+  readonly title: string;
+  readonly toolName: string;
+  readonly input: Record<string, unknown>;
+  readonly detail?: string;
+  readonly lastInputFingerprint?: string;
+};
+
+type CcbStreamToolItem = PendingToolItem & {
+  readonly itemId: RuntimeItemId;
+  readonly partialInputJson: string;
+};
+
 type CcbSessionContext = {
   session: ProviderSession;
   readonly handle: CcbSessionHandle;
   readonly transcriptPath: string;
   readonly pendingApprovals: Map<string, PendingApproval>;
-  readonly pendingToolItems: Map<
-    string,
-    { readonly itemType: CanonicalItemType; readonly title: string }
-  >;
+  readonly pendingToolItems: Map<string, PendingToolItem>;
+  readonly streamToolItemsByIndex: Map<number, CcbStreamToolItem>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   readonly streamedAssistantTextByTurnId: Map<string, string>;
   activeTurnId: TurnId | undefined;
@@ -206,6 +219,101 @@ function ccbToolItemType(toolName: string): CanonicalItemType {
   if (normalized.includes("mcp")) return "mcp_tool_call";
   if (normalized === "webfetch" || normalized === "websearch") return "web_search";
   return "dynamic_tool_call";
+}
+
+function tryParseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toolInputFingerprint(input: Record<string, unknown>): string | undefined {
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return undefined;
+  }
+}
+
+function firstToolString(...values: ReadonlyArray<unknown>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function filePathFromToolInput(input: Record<string, unknown>): string | undefined {
+  return firstToolString(
+    input.file_path,
+    input.filePath,
+    input.path,
+    input.filename,
+    input.notebook_path,
+  );
+}
+
+function commandFromToolInput(input: Record<string, unknown>): string | undefined {
+  return firstToolString(input.command, input.cmd);
+}
+
+function summarizeCcbToolRequest(
+  toolName: string,
+  input: Record<string, unknown>,
+): string | undefined {
+  const command = commandFromToolInput(input);
+  if (command) {
+    return `${toolName}: ${command.slice(0, 400)}`;
+  }
+
+  const filePath = filePathFromToolInput(input);
+  if (filePath) {
+    return `${toolName}: ${filePath}`;
+  }
+
+  if (Object.keys(input).length === 0) {
+    return undefined;
+  }
+
+  const serialized = JSON.stringify(input);
+  return serialized.length <= 400
+    ? `${toolName}: ${serialized}`
+    : `${toolName}: ${serialized.slice(0, 397)}...`;
+}
+
+function ccbToolResultStreamKind(
+  itemType: CanonicalItemType,
+): Extract<RuntimeContentStreamKind, "command_output" | "file_change_output"> | undefined {
+  switch (itemType) {
+    case "command_execution":
+      return "command_output";
+    case "file_change":
+      return "file_change_output";
+    default:
+      return undefined;
+  }
+}
+
+function ccbToolData(
+  toolName: string,
+  input: Record<string, unknown>,
+  result?: unknown,
+): Record<string, unknown> {
+  const command = commandFromToolInput(input);
+  const filePath = filePathFromToolInput(input);
+  return {
+    toolName,
+    input,
+    ...(command ? { command } : {}),
+    ...(filePath ? { filePath, files: [filePath] } : {}),
+    ...(result !== undefined ? { result } : {}),
+  };
 }
 
 function toolResultText(block: Record<string, unknown>): string {
@@ -595,6 +703,40 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
       });
 
+    const emitToolLifecycle = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      lifecycle: "item.started" | "item.updated" | "item.completed",
+      tool: PendingToolItem & { readonly itemId: RuntimeItemId },
+      raw: ProviderRuntimeEvent["raw"],
+      status: "inProgress" | "completed" | "failed",
+      result?: unknown,
+    ) =>
+      Effect.gen(function* () {
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: lifecycle,
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          itemId: tool.itemId,
+          createdAt: stamp.createdAt,
+          payload: {
+            itemType: tool.itemType,
+            status,
+            title: tool.title,
+            ...(tool.detail ? { detail: tool.detail } : {}),
+            data: ccbToolData(tool.toolName, tool.input, result),
+          },
+          raw,
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            providerItemId: ProviderItemId.makeUnsafe(String(tool.itemId)),
+          },
+        });
+      });
+
     const mapSdkMessage = (
       context: CcbSessionContext,
       turnId: TurnId,
@@ -613,9 +755,98 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         if (messageType === "stream_event") {
           const event = asObject(message.event);
           const eventType = asString(event?.type);
+          const blockIndex = typeof event?.index === "number" ? event.index : undefined;
+          if (eventType === "content_block_start") {
+            const blockObj = asObject(event?.content_block);
+            const blockType = asString(blockObj?.type);
+            if (
+              blockIndex === undefined ||
+              (blockType !== "tool_use" &&
+                blockType !== "server_tool_use" &&
+                blockType !== "mcp_tool_use")
+            ) {
+              return;
+            }
+
+            const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
+            const toolName = asString(blockObj?.name) ?? "Tool";
+            const input = asObject(blockObj?.input) ?? {};
+            const detail = summarizeCcbToolRequest(toolName, input);
+            const lastInputFingerprint =
+              Object.keys(input).length > 0 ? toolInputFingerprint(input) : undefined;
+            const tool: CcbStreamToolItem = {
+              itemId,
+              itemType: ccbToolItemType(toolName),
+              title: toolName,
+              toolName,
+              input,
+              partialInputJson: "",
+              ...(detail ? { detail } : {}),
+              ...(lastInputFingerprint ? { lastInputFingerprint } : {}),
+            };
+
+            context.turns.at(-1)?.items.push(blockObj);
+            context.streamToolItemsByIndex.set(blockIndex, tool);
+            context.pendingToolItems.set(String(itemId), tool);
+            yield* emitToolLifecycle(context, turnId, "item.started", tool, raw, "inProgress");
+            return;
+          }
+
           if (eventType === "content_block_delta") {
             const delta = asObject(event?.delta);
-            const text = asString(delta?.text) ?? asString(delta?.partial_json) ?? "";
+            const deltaType = asString(delta?.type);
+            if (deltaType === "input_json_delta") {
+              if (blockIndex === undefined) {
+                return;
+              }
+              const tool = context.streamToolItemsByIndex.get(blockIndex);
+              const partialJson = asString(delta?.partial_json);
+              if (!tool || partialJson === undefined) {
+                return;
+              }
+
+              const partialInputJson = `${tool.partialInputJson}${partialJson}`;
+              const parsedInput = tryParseJsonRecord(partialInputJson);
+              const detail = parsedInput
+                ? summarizeCcbToolRequest(tool.toolName, parsedInput)
+                : tool.detail;
+              const nextFingerprint =
+                parsedInput && Object.keys(parsedInput).length > 0
+                  ? toolInputFingerprint(parsedInput)
+                  : undefined;
+              const nextTool: CcbStreamToolItem = {
+                ...tool,
+                partialInputJson,
+                ...(parsedInput ? { input: parsedInput } : {}),
+                ...(detail ? { detail } : {}),
+                ...(nextFingerprint ? { lastInputFingerprint: nextFingerprint } : {}),
+              };
+
+              context.streamToolItemsByIndex.set(blockIndex, nextTool);
+              context.pendingToolItems.set(String(nextTool.itemId), nextTool);
+              if (
+                parsedInput &&
+                nextFingerprint &&
+                tool.lastInputFingerprint !== nextFingerprint
+              ) {
+                yield* emitToolLifecycle(
+                  context,
+                  turnId,
+                  "item.updated",
+                  nextTool,
+                  raw,
+                  "inProgress",
+                );
+              }
+              return;
+            }
+
+            const text =
+              deltaType === "thinking_delta"
+                ? (asString(delta?.thinking) ?? asString(delta?.text) ?? "")
+                : deltaType === "text_delta" || deltaType === undefined
+                  ? (asString(delta?.text) ?? "")
+                  : "";
             if (text.length > 0) {
               const stamp = yield* makeStamp();
               yield* offer({
@@ -626,7 +857,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 turnId,
                 createdAt: stamp.createdAt,
                 payload: {
-                  streamKind: asString(delta?.type)?.includes("thinking")
+                  streamKind: deltaType?.includes("thinking")
                     ? "reasoning_text"
                     : "assistant_text",
                   delta: text,
@@ -634,10 +865,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 raw,
                 providerRefs: { providerThreadId: context.handle.sessionId },
               });
-              if (!asString(delta?.type)?.includes("thinking")) {
+              if (!deltaType?.includes("thinking")) {
                 recordAssistantTextDelta(context, turnId, text);
               }
             }
+          }
+          if (eventType === "content_block_stop" && blockIndex !== undefined) {
+            context.streamToolItemsByIndex.delete(blockIndex);
           }
           return;
         }
@@ -669,33 +903,41 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   providerRefs: { providerThreadId: context.handle.sessionId },
                 });
               }
-            } else if (blockType === "tool_use") {
+            } else if (
+              blockType === "tool_use" ||
+              blockType === "server_tool_use" ||
+              blockType === "mcp_tool_use"
+            ) {
               const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
               const toolName = asString(blockObj?.name) ?? "Tool";
               const itemType = ccbToolItemType(toolName);
-              const stamp = yield* makeStamp();
-              context.turns.at(-1)?.items.push(block);
-              context.pendingToolItems.set(itemId, { itemType, title: toolName });
-              yield* offer({
-                type: "item.started",
-                eventId: stamp.eventId,
-                provider: PROVIDER,
-                threadId: context.session.threadId,
-                turnId,
+              const input =
+                asObject(blockObj?.input) ??
+                context.pendingToolItems.get(String(itemId))?.input ??
+                {};
+              const detail = summarizeCcbToolRequest(toolName, input);
+              const inputFingerprint =
+                Object.keys(input).length > 0 ? toolInputFingerprint(input) : undefined;
+              const existing = context.pendingToolItems.get(String(itemId));
+              const tool: PendingToolItem & { readonly itemId: RuntimeItemId } = {
                 itemId,
-                createdAt: stamp.createdAt,
-                payload: {
-                  itemType,
-                  status: "inProgress",
-                  title: toolName,
-                  data: blockObj,
-                },
-                raw,
-                providerRefs: {
-                  providerThreadId: context.handle.sessionId,
-                  providerItemId: ProviderItemId.makeUnsafe(itemId),
-                },
-              });
+                itemType,
+                title: toolName,
+                toolName,
+                input,
+                ...(detail ? { detail } : {}),
+                ...(inputFingerprint ? { lastInputFingerprint: inputFingerprint } : {}),
+              };
+              context.turns.at(-1)?.items.push(block);
+              context.pendingToolItems.set(String(itemId), tool);
+              if (!existing) {
+                yield* emitToolLifecycle(context, turnId, "item.started", tool, raw, "inProgress");
+              } else if (
+                inputFingerprint &&
+                existing.lastInputFingerprint !== inputFingerprint
+              ) {
+                yield* emitToolLifecycle(context, turnId, "item.updated", tool, raw, "inProgress");
+              }
             }
           }
           const finalText = finalTextBlocks.join("\n");
@@ -734,29 +976,54 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 context.pendingToolItems.delete(providerToolUseId);
               }
               const itemId = RuntimeItemId.makeUnsafe(providerToolUseId ?? crypto.randomUUID());
-              const stamp = yield* makeStamp();
-              context.turns.at(-1)?.items.push(block);
-              yield* offer({
-                type: "item.completed",
-                eventId: stamp.eventId,
-                provider: PROVIDER,
-                threadId: context.session.threadId,
-                turnId,
+              const resultText = toolResultText(block);
+              const tool: PendingToolItem & { readonly itemId: RuntimeItemId } = {
                 itemId,
-                createdAt: stamp.createdAt,
-                payload: {
-                  itemType: stored?.itemType ?? "dynamic_tool_call",
-                  status: block.is_error === true ? "failed" : "completed",
-                  title: stored?.title ?? "Tool",
-                  ...(toolResultText(block) ? { detail: toolResultText(block) } : {}),
-                  data: block,
-                },
+                itemType: stored?.itemType ?? "dynamic_tool_call",
+                title: stored?.title ?? "Tool",
+                toolName: stored?.toolName ?? stored?.title ?? "Tool",
+                input: stored?.input ?? {},
+                ...(stored?.detail
+                  ? { detail: stored.detail }
+                  : resultText
+                    ? { detail: resultText }
+                    : {}),
+                ...(stored?.lastInputFingerprint
+                  ? { lastInputFingerprint: stored.lastInputFingerprint }
+                  : {}),
+              };
+              context.turns.at(-1)?.items.push(block);
+              const streamKind = ccbToolResultStreamKind(tool.itemType);
+              if (streamKind && resultText.length > 0) {
+                const deltaStamp = yield* makeStamp();
+                yield* offer({
+                  type: "content.delta",
+                  eventId: deltaStamp.eventId,
+                  provider: PROVIDER,
+                  threadId: context.session.threadId,
+                  turnId,
+                  itemId,
+                  createdAt: deltaStamp.createdAt,
+                  payload: {
+                    streamKind,
+                    delta: resultText,
+                  },
+                  raw,
+                  providerRefs: {
+                    providerThreadId: context.handle.sessionId,
+                    providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+                  },
+                });
+              }
+              yield* emitToolLifecycle(
+                context,
+                turnId,
+                "item.completed",
+                tool,
                 raw,
-                providerRefs: {
-                  providerThreadId: context.handle.sessionId,
-                  providerItemId: ProviderItemId.makeUnsafe(providerToolUseId ?? itemId),
-                },
-              });
+                block.is_error === true ? "failed" : "completed",
+                block,
+              );
             }
             return;
           }
@@ -844,6 +1111,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             providerRefs: { providerThreadId: context.handle.sessionId },
           });
           context.streamedAssistantTextByTurnId.delete(String(turnId));
+          context.streamToolItemsByIndex.clear();
           if (isError) {
             yield* emitRuntimeError(context, asString(message.result) ?? "CCB turn failed", message);
           }
@@ -973,6 +1241,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           transcriptPath,
           pendingApprovals,
           pendingToolItems: new Map(),
+          streamToolItemsByIndex: new Map(),
           turns: [],
           streamedAssistantTextByTurnId: new Map(),
           activeTurnId: undefined,

@@ -341,6 +341,153 @@ layer(
   );
 });
 
+layer(
+  makeFakeBridge([
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 1,
+        content_block: {
+          type: "tool_use",
+          id: "tool-write-1",
+          name: "Write",
+          input: {},
+        },
+      },
+    },
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 1,
+        delta: {
+          type: "input_json_delta",
+          partial_json:
+            '{"file_path":"index.html","content":"<!DOCTYPE html><html><body>hi</body></html>"}',
+        },
+      },
+    },
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_stop",
+        index: 1,
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "I wrote index.html." },
+          {
+            type: "tool_use",
+            id: "tool-write-1",
+            name: "Write",
+            input: {
+              file_path: "index.html",
+              content: "<!DOCTYPE html><html><body>hi</body></html>",
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-write-1",
+            content:
+              '{"file_path":"index.html","content":"<!DOCTYPE html><html><body>hi</body></html>"}',
+          },
+        ],
+      },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+    },
+  ]),
+)("CcbAdapterLive streamed tool blocks", (it) => {
+  it.effect("keeps streamed tool JSON out of assistant text and emits tool lifecycle data", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "content.delta" ||
+            event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-streamed-tool-json-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "write a file",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const assistantDeltas = events.filter(
+        (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+      );
+      assert.deepEqual(
+        assistantDeltas.map((event) => (event.type === "content.delta" ? event.payload.delta : "")),
+        ["I wrote index.html."],
+      );
+      assert.equal(
+        assistantDeltas.some(
+          (event) =>
+            event.type === "content.delta" &&
+            (event.payload.delta.includes("file_path") ||
+              event.payload.delta.includes("<!DOCTYPE html>")),
+        ),
+        false,
+      );
+      assert.equal(events.filter((event) => event.type === "item.started").length, 1);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.updated" &&
+            event.payload.itemType === "file_change" &&
+            (event.payload.data as { files?: string[] }).files?.[0] === "index.html",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "file_change" &&
+            (event.payload.data as { toolName?: string }).toolName === "Write",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "file_change_output" &&
+            event.payload.delta.includes("file_path"),
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
 const lifecycleBridge = makeControllableFakeBridge();
 layer(lifecycleBridge)("CcbAdapterLive lifecycle", (it) => {
   it.effect("lists, reads, compacts, interrupts, and stops sessions", () =>
@@ -783,7 +930,7 @@ layer(
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(4),
+        Stream.take(5),
         Stream.runCollect,
         Effect.forkDetach,
       );

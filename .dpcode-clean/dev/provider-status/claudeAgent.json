@@ -1,8 +1,7 @@
 {
   "provider": "claudeAgent",
-  "status": "error",
-  "available": false,
-  "authStatus": "unknown",
-  "checkedAt": "2026-05-03T16:40:56.779Z",
-  "message": "Claude Agent CLI is installed but failed to run. Timed out while running command."
+  "status": "ready",
+  "available": true,
+  "authStatus": "authenticated",
+  "checkedAt": "2026-05-03T16:54:47.070Z"
 }
