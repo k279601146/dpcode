@@ -5315,13 +5315,15 @@ export default function ChatView({
           titleSeed = GENERIC_CHAT_THREAD_TITLE;
         }
       }
-      // Keep the optimistic label short while the server asks Codex for a better summary.
+      // Keep the optimistic label short while the server asks the provider for a better summary.
       const title = buildPromptThreadTitleFallback(titleSeed);
       const threadCreateModelSelection: ModelSelection = buildModelSelection(
         selectedProviderForSend,
         selectedModelForSend ||
-          targetProjectDefaultModelSelectionForSend?.model ||
-          DEFAULT_MODEL_BY_PROVIDER.codex,
+          (targetProjectDefaultModelSelectionForSend?.provider === selectedProviderForSend
+            ? targetProjectDefaultModelSelectionForSend.model
+            : null) ||
+          DEFAULT_MODEL_BY_PROVIDER[selectedProviderForSend],
         selectedModelSelectionForSend.options,
       );
 

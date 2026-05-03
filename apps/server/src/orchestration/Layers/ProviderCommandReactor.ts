@@ -1694,6 +1694,18 @@ const make = Effect.gen(function* () {
             return;
           }
 
+          const currentProvider = Schema.is(ProviderKind)(thread.session.providerName)
+            ? thread.session.providerName
+            : thread.modelSelection.provider;
+          if (event.payload.modelSelection.provider !== currentProvider) {
+            yield* Effect.logWarning("ignoring model metadata update for bound provider session", {
+              threadId: event.payload.threadId,
+              currentProvider,
+              requestedProvider: event.payload.modelSelection.provider,
+            });
+            return;
+          }
+
           const cachedProviderOptions = threadProviderOptions.get(event.payload.threadId);
           yield* ensureSessionForThread(event.payload.threadId, event.occurredAt, {
             modelSelection: event.payload.modelSelection,

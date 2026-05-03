@@ -176,6 +176,16 @@ describe("resolvePreferredComposerModelSelection", () => {
       }),
     ).toEqual(modelSelection("ccb", "openai/gpt-4.1"));
   });
+
+  it("falls back to CCB when no draft, thread, project, or app default exists", () => {
+    expect(
+      resolvePreferredComposerModelSelection({
+        draft: null,
+        threadModelSelection: null,
+        projectModelSelection: null,
+      }),
+    ).toEqual(modelSelection("ccb", "claude-sonnet-4-6"));
+  });
 });
 
 describe("composerDraftStore addImages", () => {

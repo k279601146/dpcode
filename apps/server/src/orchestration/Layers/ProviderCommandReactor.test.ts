@@ -1742,6 +1742,49 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("ignores cross-provider model metadata for an already bound CCB session", async () => {
+    const harness = await createHarness({
+      threadModelSelection: { provider: "ccb", model: "claude-sonnet-4-6" },
+    });
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-ccb-bootstrap"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-ccb-bootstrap"),
+          role: "user",
+          text: "bootstrap ccb session",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    harness.startSession.mockClear();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-thread-meta-update-ccb-codex"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        modelSelection: {
+          provider: "codex",
+          model: "gpt-5.5",
+        },
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.startSession).not.toHaveBeenCalled();
+  });
+
   it("forwards claude fast mode options through session start and turn send", async () => {
     const harness = await createHarness({
       threadModelSelection: { provider: "claudeAgent", model: "claude-opus-4-6" },

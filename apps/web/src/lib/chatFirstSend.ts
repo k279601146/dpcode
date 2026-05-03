@@ -1,4 +1,8 @@
-import { DEFAULT_MODEL_BY_PROVIDER, type ModelSelection } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  DEFAULT_PROVIDER_KIND,
+  type ModelSelection,
+} from "@t3tools/contracts";
 import { workspaceRootsEqual } from "@t3tools/shared/threadWorkspace";
 
 import type { Project } from "../types";
@@ -70,8 +74,8 @@ export function resolveFirstSendTarget(input: {
       workspaceRoot: selectedWorkspaceRoot,
       title: buildProjectTitleFromWorkspaceRoot(selectedWorkspaceRoot),
       defaultModelSelection: {
-        provider: "codex",
-        model: DEFAULT_MODEL_BY_PROVIDER.codex,
+        provider: DEFAULT_PROVIDER_KIND,
+        model: DEFAULT_MODEL_BY_PROVIDER[DEFAULT_PROVIDER_KIND],
       },
     },
   };

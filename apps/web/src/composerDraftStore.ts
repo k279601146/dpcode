@@ -4,6 +4,7 @@ import {
   type GeminiThinkingBudget,
   type GeminiThinkingLevel,
   type ModelSlug,
+  DEFAULT_PROVIDER_KIND,
   ModelSelection,
   OrchestrationThreadPullRequest,
   ProjectId,
@@ -1125,7 +1126,7 @@ export function resolvePreferredComposerModelSelection(input: {
     input.threadModelSelection?.provider ??
     input.projectModelSelection?.provider ??
     input.defaultProvider ??
-    "codex";
+    DEFAULT_PROVIDER_KIND;
 
   return (
     input.draft?.modelSelectionByProvider?.[preferredProvider] ??

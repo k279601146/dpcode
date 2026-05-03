@@ -15,6 +15,7 @@ import {
   type ProviderListAgentsResult,
   type ProviderListCommandsResult,
   type ProviderListModelsResult,
+  type ProviderListSkillsResult,
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSession,
@@ -44,7 +45,7 @@ import {
 } from "../Errors.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolveCcbVendorPath } from "../ccbVendorPath.ts";
 import { CcbAdapter, type CcbAdapterShape } from "../Services/CcbAdapter.ts";
@@ -53,7 +54,7 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v2";
+const CCB_BRIDGE_CACHE_VERSION = "v3";
 const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
   "MACRO.VERSION": JSON.stringify("2.1.888"),
   "MACRO.BUILD_TIME": JSON.stringify(new Date().toISOString()),
@@ -75,9 +76,32 @@ type CcbBridgeModule = {
     permissionMode?: string;
     openAiBaseUrl?: string;
     openAiApiKey?: string;
+    initialMessages?: unknown[];
     canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
   }): Promise<CcbSessionHandle>;
   listDpcodeCcbCommands?(cwd: string): Promise<ReadonlyArray<{ name: string; description?: string }>>;
+  listDpcodeCcbSkills?(
+    cwd: string,
+  ): Promise<
+    ReadonlyArray<{
+      name: string;
+      description?: string;
+      path: string;
+      enabled: boolean;
+      scope?: string;
+      displayName?: string;
+      shortDescription?: string;
+    }>
+  >;
+  listDpcodeCcbMcpStatus?(cwd: string): Promise<{
+    servers: ReadonlyArray<{
+      name: string;
+      transport: string;
+      scope?: string;
+      enabled: boolean;
+    }>;
+    errors: ReadonlyArray<string>;
+  }>;
 };
 
 type CcbSessionHandle = {
@@ -103,6 +127,7 @@ type PendingApproval = {
 type CcbSessionContext = {
   session: ProviderSession;
   readonly handle: CcbSessionHandle;
+  readonly transcriptPath: string;
   readonly pendingApprovals: Map<string, PendingApproval>;
   readonly pendingToolItems: Map<
     string,
@@ -219,6 +244,42 @@ function defaultCcbBridgeBundlePath(vendorPath: string): string {
     .update(CCB_BRIDGE_CACHE_VERSION)
     .digest("hex");
   return resolve(tmpdir(), "dpcode-ccb-bridge", cacheKey, "bridge.mjs");
+}
+
+type CcbResumeCursor = {
+  ccbSessionId?: string;
+  transcriptPath?: string;
+  turnCount?: number;
+};
+
+function asCcbResumeCursor(value: unknown): CcbResumeCursor | undefined {
+  const cursor = asObject(value);
+  if (!cursor) return undefined;
+  return {
+    ...(typeof cursor.ccbSessionId === "string" ? { ccbSessionId: cursor.ccbSessionId } : {}),
+    ...(typeof cursor.transcriptPath === "string" ? { transcriptPath: cursor.transcriptPath } : {}),
+    ...(typeof cursor.turnCount === "number" ? { turnCount: cursor.turnCount } : {}),
+  };
+}
+
+function ccbTranscriptPath(threadId: ThreadId, sessionId: string): string {
+  return resolve(tmpdir(), "dpcode-ccb-transcripts", String(threadId), `${sessionId}.json`);
+}
+
+async function readCcbTranscript(transcriptPath: string | undefined): Promise<unknown[] | undefined> {
+  if (!transcriptPath) return undefined;
+  try {
+    const raw = await readFile(transcriptPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeCcbTranscript(transcriptPath: string, messages: readonly unknown[]): Promise<void> {
+  await mkdir(dirname(transcriptPath), { recursive: true });
+  await writeFile(transcriptPath, JSON.stringify(messages), "utf8");
 }
 
 function ccbBridgeFreshnessInputs(vendorPath: string): ReadonlyArray<string> {
@@ -484,6 +545,22 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
       });
 
+    const emitMcpStatus = (context: CcbSessionContext, status: unknown) =>
+      Effect.gen(function* () {
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "mcp.status.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          createdAt: stamp.createdAt,
+          payload: { status },
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+          },
+        });
+      });
+
     const mapSdkMessage = (
       context: CcbSessionContext,
       turnId: TurnId,
@@ -687,6 +764,20 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         }
 
         if (messageType === "result") {
+          yield* Effect.tryPromise({
+            try: () => writeCcbTranscript(context.transcriptPath, context.handle.getMessages()),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/transcript/write",
+                detail: toMessage(cause, "Failed to persist CCB transcript"),
+                cause,
+              }),
+          }).pipe(
+            Effect.catch((error) =>
+              emitRuntimeError(context, error.detail, error.cause),
+            ),
+          );
           const stamp = yield* makeStamp();
           const isError = message.is_error === true;
           yield* offer({
@@ -729,6 +820,17 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const threadId = input.threadId;
         const pendingApprovals = new Map<string, PendingApproval>();
         const runtimeMode = input.runtimeMode;
+        const resumeCursor = asCcbResumeCursor(input.resumeCursor);
+        const initialMessages = yield* Effect.tryPromise({
+          try: () => readCcbTranscript(resumeCursor?.transcriptPath),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/resume",
+              detail: toMessage(cause, "Failed to read CCB transcript"),
+              cause,
+            }),
+        });
 
         const handle = yield* Effect.tryPromise({
           try: () =>
@@ -747,6 +849,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               ...(input.providerOptions?.ccb?.openAiApiKey
                 ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
                 : {}),
+              ...(initialMessages ? { initialMessages } : {}),
               canUseTool: async (tool, toolInput) => {
                 const inputObject = asObject(toolInput) ?? {};
                 if (runtimeMode === "full-access") {
@@ -800,6 +903,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               cause,
             }),
         });
+        const transcriptPath =
+          resumeCursor?.transcriptPath ?? ccbTranscriptPath(threadId, handle.sessionId);
 
         const session: ProviderSession = {
           provider: PROVIDER,
@@ -810,7 +915,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           threadId,
           resumeCursor: {
             ccbSessionId: handle.sessionId,
-            turnCount: 0,
+            transcriptPath,
+            turnCount: resumeCursor?.turnCount ?? 0,
           },
           createdAt,
           updatedAt: createdAt,
@@ -819,6 +925,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const context: CcbSessionContext = {
           session,
           handle,
+          transcriptPath,
           pendingApprovals,
           pendingToolItems: new Map(),
           turns: [],
@@ -838,12 +945,36 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           payload: {
             message: "CCB session started",
             resume: session.resumeCursor,
+            resumed: initialMessages !== undefined,
           },
           providerRefs: {
             providerThreadId: handle.sessionId,
           },
         });
         yield* emitSessionState(context, "ready");
+
+        if (bridge.listDpcodeCcbMcpStatus) {
+          const mcpStatus = yield* Effect.tryPromise({
+            try: () => bridge.listDpcodeCcbMcpStatus!(input.cwd ?? process.cwd()),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "mcp/status",
+                detail: toMessage(cause, "Failed to load CCB MCP status"),
+                cause,
+              }),
+          }).pipe(
+            Effect.catch((error) =>
+              Effect.succeed({
+                servers: [],
+                errors: [error.detail],
+              }),
+            ),
+          );
+
+          yield* emitMcpStatus(context, mcpStatus);
+        }
+
         return session;
       });
 
@@ -863,6 +994,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           ...context.session,
           status: "running",
           activeTurnId: turnId,
+          resumeCursor: {
+            ccbSessionId: context.handle.sessionId,
+            transcriptPath: context.transcriptPath,
+            turnCount: context.turns.length,
+          },
           updatedAt: startedAt,
         };
 
@@ -895,10 +1031,22 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 activeTurnId: undefined,
                 resumeCursor: {
                   ccbSessionId: context.handle.sessionId,
+                  transcriptPath: context.transcriptPath,
                   turnCount: context.turns.length,
                 },
                 updatedAt: new Date().toISOString(),
               };
+              try {
+                await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
+              } catch (cause) {
+                await Effect.runPromise(
+                  emitRuntimeError(
+                    context,
+                    toMessage(cause, "Failed to persist CCB transcript"),
+                    cause,
+                  ),
+                );
+              }
               await Effect.runPromise(emitSessionState(context, "ready"));
             } catch (cause) {
               await Effect.runPromise(emitRuntimeError(context, toMessage(cause, "CCB turn failed"), cause));
@@ -1046,6 +1194,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           ...context.session,
           resumeCursor: {
             ccbSessionId: context.handle.sessionId,
+            transcriptPath: context.transcriptPath,
             turnCount: context.turns.length,
           },
           updatedAt: yield* nowIso,
@@ -1056,26 +1205,109 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
     const compactThread: NonNullable<CcbAdapterShape["compactThread"]> = (threadId) =>
       Effect.gen(function* () {
         const context = yield* requireSession(threadId);
-        const itemId = RuntimeItemId.makeUnsafe(yield* Random.nextUUIDv4);
+        if (context.activeTurnId) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/compact",
+            detail: "Cannot compact a CCB thread while another turn is running.",
+          });
+        }
+
+        const turnId = TurnId.makeUnsafe(yield* Random.nextUUIDv4);
         const stamp = yield* makeStamp();
+        context.activeTurnId = turnId;
+        context.turns.push({ id: turnId, items: [] });
+        context.session = {
+          ...context.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: stamp.createdAt,
+        };
+
         yield* offer({
-          type: "item.completed",
+          type: "turn.started",
           eventId: stamp.eventId,
           provider: PROVIDER,
           threadId,
-          ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
-          itemId,
+          turnId,
           createdAt: stamp.createdAt,
           payload: {
-            itemType: "context_compaction",
-            status: "completed",
-            title: "Context compact requested",
-            detail: "CCB will compact through its native loop when the next boundary is emitted.",
+            model: context.session.model ?? DEFAULT_MODEL_BY_PROVIDER.ccb,
           },
           providerRefs: {
             providerThreadId: context.handle.sessionId,
-            providerItemId: ProviderItemId.makeUnsafe(itemId),
           },
+        });
+        yield* emitSessionState(context, "running");
+
+        yield* Effect.tryPromise({
+          try: async () => {
+            try {
+              for await (const message of context.handle.submitMessage("/compact", { uuid: turnId })) {
+                await Effect.runPromise(mapSdkMessage(context, turnId, message));
+              }
+              context.activeTurnId = undefined;
+              context.session = {
+                ...context.session,
+                status: "ready",
+                activeTurnId: undefined,
+                resumeCursor: {
+                  ccbSessionId: context.handle.sessionId,
+                  transcriptPath: context.transcriptPath,
+                  turnCount: context.turns.length,
+                },
+                updatedAt: new Date().toISOString(),
+              };
+              try {
+                await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
+              } catch (cause) {
+                await Effect.runPromise(
+                  emitRuntimeError(
+                    context,
+                    toMessage(cause, "Failed to persist CCB transcript"),
+                    cause,
+                  ),
+                );
+              }
+              await Effect.runPromise(emitSessionState(context, "ready"));
+            } catch (cause) {
+              await Effect.runPromise(
+                emitRuntimeError(context, toMessage(cause, "CCB compact failed"), cause),
+              );
+              const errorStamp = {
+                eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                createdAt: new Date().toISOString(),
+              };
+              await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
+                eventId: errorStamp.eventId,
+                provider: PROVIDER,
+                threadId,
+                turnId,
+                createdAt: errorStamp.createdAt,
+                payload:
+                  context.handle.getAbortSignal().aborted
+                    ? { reason: "interrupted" }
+                    : { state: "failed", errorMessage: toMessage(cause, "CCB compact failed") },
+                providerRefs: { providerThreadId: context.handle.sessionId },
+              } satisfies ProviderRuntimeEvent));
+              context.activeTurnId = undefined;
+              context.session = {
+                ...context.session,
+                status: "error",
+                activeTurnId: undefined,
+                lastError: toMessage(cause, "CCB compact failed"),
+                updatedAt: new Date().toISOString(),
+              };
+            }
+          },
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "thread/compact",
+              detail: toMessage(cause, "CCB compact failed"),
+              cause,
+            }),
         });
       });
 
@@ -1135,6 +1367,43 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         } satisfies ProviderListCommandsResult;
       });
 
+    const listSkills: NonNullable<CcbAdapterShape["listSkills"]> = (input) =>
+      Effect.gen(function* () {
+        const bridge = yield* loadBridgeModule();
+        if (!bridge.listDpcodeCcbSkills) {
+          return { skills: [], source: PROVIDER, cached: false } satisfies ProviderListSkillsResult;
+        }
+        const skills = yield* Effect.tryPromise({
+          try: () => bridge.listDpcodeCcbSkills!(input.cwd),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "skills/list",
+              detail: toMessage(cause, "Failed to list CCB skills"),
+              cause,
+            }),
+        });
+        return {
+          skills: skills.map((skill) => ({
+            name: skill.name,
+            ...(skill.description ? { description: skill.description } : {}),
+            path: skill.path,
+            enabled: skill.enabled,
+            ...(skill.scope ? { scope: skill.scope } : {}),
+            ...((skill.displayName || skill.shortDescription)
+              ? {
+                  interface: {
+                    ...(skill.displayName ? { displayName: skill.displayName } : {}),
+                    ...(skill.shortDescription ? { shortDescription: skill.shortDescription } : {}),
+                  },
+                }
+              : {}),
+          })),
+          source: PROVIDER,
+          cached: false,
+        } satisfies ProviderListSkillsResult;
+      });
+
     const listAgents: NonNullable<CcbAdapterShape["listAgents"]> = () =>
       Effect.succeed({ agents: [], source: PROVIDER, cached: false } satisfies ProviderListAgentsResult);
 
@@ -1175,13 +1444,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
       stopAll: () =>
         Effect.gen(function* () {
           for (const threadId of Array.from(sessions.keys())) {
-            yield* stopSession(threadId).pipe(Effect.catchAll(() => Effect.void));
+            yield* stopSession(threadId).pipe(Effect.catch(() => Effect.void));
           }
         }).pipe(Effect.zipRight(Queue.shutdown(runtimeEventQueue))),
       streamEvents: Stream.fromQueue(runtimeEventQueue),
       getComposerCapabilities: () => Effect.succeed(composerCapabilities),
       listCommands,
-      listSkills: () => Effect.succeed({ skills: [], source: PROVIDER, cached: false }),
+      listSkills,
       listPlugins: () =>
         Effect.succeed({
           marketplaces: [],
