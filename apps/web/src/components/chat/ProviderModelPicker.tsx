@@ -46,6 +46,7 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
+  ccb: ClaudeAI,
   codex: OpenAI,
   claudeAgent: ClaudeAI,
   gemini: Gemini,
@@ -90,7 +91,7 @@ function providerIconClassName(
   provider: ProviderKind | ProviderPickerKind,
   fallbackClassName: string,
 ): string {
-  return provider === "claudeAgent" || provider === "gemini"
+  return provider === "ccb" || provider === "claudeAgent" || provider === "gemini"
     ? "text-foreground"
     : fallbackClassName;
 }

@@ -6,7 +6,7 @@
 import { Schema } from "effect";
 import { TrimmedNonEmptyString } from "./baseSchemas";
 
-const ProviderDiscoveryKind = Schema.Literals(["codex", "claudeAgent", "gemini", "opencode"]);
+const ProviderDiscoveryKind = Schema.Literals(["ccb", "codex", "claudeAgent", "gemini", "opencode"]);
 
 export const ProviderSkillInterface = Schema.Struct({
   displayName: Schema.optional(TrimmedNonEmptyString),
@@ -213,6 +213,8 @@ export type ProviderReadPluginResult = typeof ProviderReadPluginResult.Type;
 export const ProviderListModelsInput = Schema.Struct({
   provider: ProviderDiscoveryKind,
   binaryPath: Schema.optional(TrimmedNonEmptyString),
+  ccbOpenAiBaseUrl: Schema.optional(TrimmedNonEmptyString),
+  ccbOpenAiApiKey: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProviderListModelsInput = typeof ProviderListModelsInput.Type;
 

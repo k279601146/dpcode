@@ -35,10 +35,7 @@ export const PROVIDER_OPTIONS: Array<{
   label: string;
   available: boolean;
 }> = [
-  { value: "codex", label: "Codex", available: true },
-  { value: "claudeAgent", label: "Claude", available: true },
-  { value: "gemini", label: "Gemini", available: true },
-  { value: "opencode", label: "OpenCode", available: true },
+  { value: "ccb", label: "CCB", available: true },
 ];
 
 export interface WorkLogEntry {

@@ -77,12 +77,14 @@ type PluginBrandArtwork = {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const PROVIDER_ICON: Record<ProviderKind, React.FC<React.SVGProps<SVGSVGElement>>> = {
+  ccb: ClaudeAI,
   codex: HammerIcon,
   claudeAgent: ClaudeAI,
   gemini: Gemini,
   opencode: OpenCodeIcon,
 };
 const PROVIDER_DISCOVERY_ORDER: ReadonlyArray<ProviderKind> = [
+  "ccb",
   "codex",
   "claudeAgent",
   "gemini",
@@ -383,6 +385,7 @@ export function PluginLibrary() {
   const providerThreadId = focusedThreadId;
 
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const ccbCapabilitiesQuery = useQuery(providerComposerCapabilitiesQueryOptions("ccb"));
   const codexCapabilitiesQuery = useQuery(providerComposerCapabilitiesQueryOptions("codex"));
   const claudeCapabilitiesQuery = useQuery(providerComposerCapabilitiesQueryOptions("claudeAgent"));
   const geminiCapabilitiesQuery = useQuery(providerComposerCapabilitiesQueryOptions("gemini"));
@@ -390,6 +393,10 @@ export function PluginLibrary() {
 
   const providerCapabilities = useMemo<Record<ProviderKind, ProviderCapabilities>>(
     () => ({
+      ccb: {
+        plugins: supportsPluginDiscovery(ccbCapabilitiesQuery.data),
+        skills: supportsSkillDiscovery(ccbCapabilitiesQuery.data),
+      },
       codex: {
         plugins: supportsPluginDiscovery(codexCapabilitiesQuery.data),
         skills: supportsSkillDiscovery(codexCapabilitiesQuery.data),
@@ -408,6 +415,7 @@ export function PluginLibrary() {
       },
     }),
     [
+      ccbCapabilitiesQuery.data,
       claudeCapabilitiesQuery.data,
       codexCapabilitiesQuery.data,
       geminiCapabilitiesQuery.data,

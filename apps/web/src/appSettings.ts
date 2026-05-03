@@ -36,6 +36,7 @@ export function getDefaultNativeFontSmoothing(platform = globalThis.navigator?.p
 }
 
 type CustomModelSettingsKey =
+  | "customCcbModels"
   | "customCodexModels"
   | "customClaudeModels"
   | "customGeminiModels"
@@ -51,6 +52,7 @@ export type ProviderCustomModelConfig = {
 };
 
 const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>> = {
+  ccb: new Set(getModelOptions("ccb").map((option) => option.slug)),
   codex: new Set(getModelOptions("codex").map((option) => option.slug)),
   claudeAgent: new Set(getModelOptions("claudeAgent").map((option) => option.slug)),
   gemini: new Set(getModelOptions("gemini").map((option) => option.slug)),
@@ -71,6 +73,12 @@ const withDefaults =
     );
 
 export const AppSettingsSchema = Schema.Struct({
+  ccbOpenAiBaseUrl: Schema.String.check(Schema.isMaxLength(4096)).pipe(
+    withDefaults(() => "http://127.0.0.1:8317/v1"),
+  ),
+  ccbOpenAiApiKey: Schema.String.check(Schema.isMaxLength(4096)).pipe(
+    withDefaults(() => "your-api-key-1"),
+  ),
   claudeBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   chatFontSizePx: Schema.Number.pipe(withDefaults(() => DEFAULT_CHAT_FONT_SIZE_PX)),
   chatCodeFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(withDefaults(() => "")),
@@ -99,13 +107,14 @@ export const AppSettingsSchema = Schema.Struct({
     withDefaults(() => DEFAULT_SIDEBAR_THREAD_SORT_ORDER),
   ),
   timestampFormat: TimestampFormat.pipe(withDefaults(() => DEFAULT_TIMESTAMP_FORMAT)),
+  customCcbModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customCodexModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customClaudeModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customGeminiModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customOpenCodeModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   textGenerationModel: Schema.optional(TrimmedNonEmptyString),
   uiFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(withDefaults(() => "")),
-  defaultProvider: ProviderKind.pipe(withDefaults(() => "codex" as const)),
+  defaultProvider: ProviderKind.pipe(withDefaults(() => "ccb" as const)),
 });
 export type AppSettings = typeof AppSettingsSchema.Type;
 
@@ -116,6 +125,15 @@ export interface AppModelOption extends ProviderModelOption {
 const DEFAULT_APP_SETTINGS = AppSettingsSchema.makeUnsafe({});
 
 const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConfig> = {
+  ccb: {
+    provider: "ccb",
+    settingsKey: "customCcbModels",
+    defaultSettingsKey: "customCcbModels",
+    title: "CCB",
+    description: "Save additional CCB/OpenAI-compatible model slugs for the picker.",
+    placeholder: "provider/model-or-model-id",
+    example: "gpt-5.1-codex",
+  },
   codex: {
     provider: "codex",
     settingsKey: "customCodexModels",
@@ -196,7 +214,11 @@ export function normalizeChatFontSizePx(value: number | null | undefined): numbe
 function normalizeAppSettings(settings: AppSettings): AppSettings {
   return {
     ...settings,
+    ccbOpenAiBaseUrl:
+      settings.ccbOpenAiBaseUrl.trim() || DEFAULT_APP_SETTINGS.ccbOpenAiBaseUrl,
+    ccbOpenAiApiKey: settings.ccbOpenAiApiKey.trim() || DEFAULT_APP_SETTINGS.ccbOpenAiApiKey,
     chatFontSizePx: normalizeChatFontSizePx(settings.chatFontSizePx),
+    customCcbModels: normalizeCustomModelSlugs(settings.customCcbModels, "ccb"),
     customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels, "codex"),
     customClaudeModels: normalizeCustomModelSlugs(settings.customClaudeModels, "claudeAgent"),
     customGeminiModels: normalizeCustomModelSlugs(settings.customGeminiModels, "gemini"),
@@ -212,14 +234,14 @@ export function getCustomModelsForProvider(
   settings: Pick<AppSettings, CustomModelSettingsKey>,
   provider: ProviderKind,
 ): readonly string[] {
-  return settings[PROVIDER_CUSTOM_MODEL_CONFIG[provider].settingsKey];
+  return settings[PROVIDER_CUSTOM_MODEL_CONFIG[provider].settingsKey] ?? [];
 }
 
 export function getDefaultCustomModelsForProvider(
   defaults: Pick<AppSettings, CustomModelSettingsKey>,
   provider: ProviderKind,
 ): readonly string[] {
-  return defaults[PROVIDER_CUSTOM_MODEL_CONFIG[provider].defaultSettingsKey];
+  return defaults[PROVIDER_CUSTOM_MODEL_CONFIG[provider].defaultSettingsKey] ?? [];
 }
 
 export function patchCustomModels(
@@ -235,6 +257,7 @@ export function getCustomModelsByProvider(
   settings: Pick<AppSettings, CustomModelSettingsKey>,
 ): Record<ProviderKind, readonly string[]> {
   return {
+    ccb: getCustomModelsForProvider(settings, "ccb"),
     codex: getCustomModelsForProvider(settings, "codex"),
     claudeAgent: getCustomModelsForProvider(settings, "claudeAgent"),
     gemini: getCustomModelsForProvider(settings, "gemini"),
@@ -335,6 +358,7 @@ export function getCustomModelOptionsByProvider(
     codex: getAppModelOptions("codex", customModelsByProvider.codex),
     claudeAgent: getAppModelOptions("claudeAgent", customModelsByProvider.claudeAgent),
     gemini: getAppModelOptions("gemini", customModelsByProvider.gemini),
+    ccb: getAppModelOptions("ccb", customModelsByProvider.ccb),
     opencode: getAppModelOptions("opencode", customModelsByProvider.opencode),
   };
 }
@@ -342,6 +366,8 @@ export function getCustomModelOptionsByProvider(
 export function getProviderStartOptions(
   settings: Pick<
     AppSettings,
+    | "ccbOpenAiApiKey"
+    | "ccbOpenAiBaseUrl"
     | "claudeBinaryPath"
     | "codexBinaryPath"
     | "codexHomePath"
@@ -352,6 +378,14 @@ export function getProviderStartOptions(
   >,
 ): ProviderStartOptions | undefined {
   const providerOptions: ProviderStartOptions = {
+    ...(settings.ccbOpenAiBaseUrl || settings.ccbOpenAiApiKey
+      ? {
+          ccb: {
+            ...(settings.ccbOpenAiBaseUrl ? { openAiBaseUrl: settings.ccbOpenAiBaseUrl } : {}),
+            ...(settings.ccbOpenAiApiKey ? { openAiApiKey: settings.ccbOpenAiApiKey } : {}),
+          },
+        }
+      : {}),
     ...(settings.codexBinaryPath || settings.codexHomePath
       ? {
           codex: {
@@ -398,6 +432,8 @@ export function getCustomBinaryPathForProvider(
   provider: ProviderKind,
 ): string {
   switch (provider) {
+    case "ccb":
+      return "";
     case "codex":
       return settings.codexBinaryPath;
     case "claudeAgent":

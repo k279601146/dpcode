@@ -10,6 +10,7 @@ import {
   describeVoiceRecordingStartError,
   hasServerAcknowledgedLocalDispatch,
   isVoiceAuthExpiredMessage,
+  resolveLocalDraftFallbackModelSelection,
   resolveActiveThreadTitle,
   sanitizeVoiceErrorMessage,
   buildExpiredTerminalContextToastCopy,
@@ -150,6 +151,40 @@ describe("voice helpers", () => {
       canRenderVoiceNotes: false,
       canStartVoiceNotes: false,
       showVoiceNotesControl: true,
+    });
+  });
+});
+
+describe("resolveLocalDraftFallbackModelSelection", () => {
+  it("uses the app default provider for home chat drafts", () => {
+    expect(
+      resolveLocalDraftFallbackModelSelection({
+        projectDefaultModelSelection: {
+          provider: "codex",
+          model: "gpt-5.5",
+        },
+        isHomeChatContainer: true,
+        defaultProvider: "ccb",
+      }),
+    ).toEqual({
+      provider: "ccb",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  it("keeps the project default model for non-home drafts", () => {
+    expect(
+      resolveLocalDraftFallbackModelSelection({
+        projectDefaultModelSelection: {
+          provider: "codex",
+          model: "gpt-5.5",
+        },
+        isHomeChatContainer: false,
+        defaultProvider: "ccb",
+      }),
+    ).toEqual({
+      provider: "codex",
+      model: "gpt-5.5",
     });
   });
 });

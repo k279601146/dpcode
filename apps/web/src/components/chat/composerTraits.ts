@@ -4,6 +4,7 @@
 // Depends on: shared model capability helpers and provider model option types.
 
 import {
+  type CcbModelOptions,
   type ClaudeModelOptions,
   type CodexModelOptions,
   type GeminiModelOptions,
@@ -34,7 +35,7 @@ function getRawEffort(
   if (provider === "codex") {
     return trimOrNull((modelOptions as CodexModelOptions | undefined)?.reasoningEffort);
   }
-  if (provider === "claudeAgent") {
+  if (provider === "ccb" || provider === "claudeAgent") {
     return trimOrNull((modelOptions as ClaudeModelOptions | undefined)?.effort);
   }
   if (provider === "opencode") {
@@ -48,10 +49,10 @@ function getRawContextWindow(
   provider: ProviderKind,
   modelOptions: ProviderOptions | null | undefined,
 ): string | null {
-  if (provider !== "claudeAgent") {
+  if (provider !== "ccb" && provider !== "claudeAgent") {
     return null;
   }
-  return trimOrNull((modelOptions as ClaudeModelOptions | undefined)?.contextWindow);
+  return trimOrNull((modelOptions as CcbModelOptions | ClaudeModelOptions | undefined)?.contextWindow);
 }
 
 // Resolve the currently selected composer traits from capabilities plus draft overrides.

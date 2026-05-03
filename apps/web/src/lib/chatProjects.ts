@@ -2,7 +2,12 @@
 // Purpose: Reuse one hidden home-scoped chat project as the backing container for chat rows.
 // Layer: Web orchestration helper
 
-import { type ProjectId } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  type ModelSelection,
+  type ProjectId,
+  type ProviderKind,
+} from "@t3tools/contracts";
 import type { Project } from "../types";
 import { readNativeApi } from "../nativeApi";
 import { useStore } from "../store";
@@ -11,6 +16,13 @@ import { newCommandId, newProjectId } from "./utils";
 
 const pendingHomeChatCreationByHomeDir = new Map<string, Promise<ProjectId | null>>();
 const pendingHomeChatFixupByHomeDir = new Map<string, Promise<void>>();
+
+function buildDefaultModelSelection(provider: ProviderKind): ModelSelection {
+  return {
+    provider,
+    model: DEFAULT_MODEL_BY_PROVIDER[provider],
+  };
+}
 
 export function findHomeChatContainerProject<
   T extends Pick<Project, "cwd" | "kind" | "name" | "remoteName">,
@@ -56,7 +68,20 @@ function findCanonicalHomeProject(homeDir: string): {
   };
 }
 
-async function fixupHomeChatProject(homeDir: string): Promise<void> {
+function shouldUpdateHomeChatProjectModelSelection(
+  current: ModelSelection | null | undefined,
+  expected: ModelSelection | null | undefined,
+): boolean {
+  if (!expected) {
+    return false;
+  }
+  return current?.provider !== expected.provider || current?.model !== expected.model;
+}
+
+async function fixupHomeChatProject(
+  homeDir: string,
+  defaultModelSelection?: ModelSelection | null,
+): Promise<void> {
   const api = readNativeApi();
   if (!api) {
     return;
@@ -68,7 +93,14 @@ async function fixupHomeChatProject(homeDir: string): Promise<void> {
     return;
   }
 
-  if (needsKindFixup) {
+  const currentProject =
+    useStore.getState().projects.find((project) => project.id === canonicalProjectId) ?? null;
+  const shouldUpdateDefaultModelSelection = shouldUpdateHomeChatProjectModelSelection(
+    currentProject?.defaultModelSelection,
+    defaultModelSelection,
+  );
+
+  if (needsKindFixup || shouldUpdateDefaultModelSelection) {
     await api.orchestration.dispatchCommand({
       type: "project.meta.update",
       commandId: newCommandId(),
@@ -76,6 +108,7 @@ async function fixupHomeChatProject(homeDir: string): Promise<void> {
       kind: "chat",
       title: "Home",
       workspaceRoot: homeDir,
+      ...(shouldUpdateDefaultModelSelection ? { defaultModelSelection } : {}),
     });
   }
 
@@ -88,17 +121,23 @@ async function fixupHomeChatProject(homeDir: string): Promise<void> {
   }
 }
 
-function scheduleHomeChatFixup(homeDir: string): void {
+function scheduleHomeChatFixup(
+  homeDir: string,
+  defaultModelSelection?: ModelSelection | null,
+): void {
   if (pendingHomeChatFixupByHomeDir.has(homeDir)) {
     return;
   }
-  const promise = fixupHomeChatProject(homeDir).finally(() => {
+  const promise = fixupHomeChatProject(homeDir, defaultModelSelection).finally(() => {
     pendingHomeChatFixupByHomeDir.delete(homeDir);
   });
   pendingHomeChatFixupByHomeDir.set(homeDir, promise);
 }
 
-export async function ensureHomeChatProject(homeDir: string): Promise<ProjectId | null> {
+export async function ensureHomeChatProject(
+  homeDir: string,
+  defaultModelSelection: ModelSelection = buildDefaultModelSelection("ccb"),
+): Promise<ProjectId | null> {
   const api = readNativeApi();
   if (!api) {
     return null;
@@ -106,7 +145,7 @@ export async function ensureHomeChatProject(homeDir: string): Promise<ProjectId 
 
   const { canonicalProjectId } = findCanonicalHomeProject(homeDir);
   if (canonicalProjectId) {
-    scheduleHomeChatFixup(homeDir);
+    scheduleHomeChatFixup(homeDir, defaultModelSelection);
     return canonicalProjectId;
   }
 
@@ -124,6 +163,7 @@ export async function ensureHomeChatProject(homeDir: string): Promise<ProjectId 
       kind: "chat",
       title: "Home",
       workspaceRoot: homeDir,
+      defaultModelSelection,
       createdAt: new Date().toISOString(),
     });
     return projectId;
@@ -135,8 +175,11 @@ export async function ensureHomeChatProject(homeDir: string): Promise<ProjectId 
   return creationPromise;
 }
 
-export function prewarmHomeChatProject(homeDir: string): void {
-  void ensureHomeChatProject(homeDir);
+export function prewarmHomeChatProject(
+  homeDir: string,
+  defaultModelSelection: ModelSelection = buildDefaultModelSelection("ccb"),
+): void {
+  void ensureHomeChatProject(homeDir, defaultModelSelection);
 }
 
 export function isHomeChatContainerProject(

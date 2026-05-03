@@ -1,0 +1,8 @@
+{
+  "provider": "ccb",
+  "status": "warning",
+  "available": true,
+  "authStatus": "unknown",
+  "checkedAt": "2026-05-03T12:44:07.600Z",
+  "message": "CCB is embedded but its vendor dependencies are not installed. Run `bun install` inside CCB-claude-best-t3code before starting CCB sessions."
+}

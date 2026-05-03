@@ -46,6 +46,7 @@ import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { isElectron } from "../env";
 import { useTheme } from "../hooks/useTheme";
 import { gitRemoveWorktreeMutationOptions } from "../lib/gitReactQuery";
+import { providerModelsQueryOptions } from "../lib/providerDiscoveryReactQuery";
 import {
   ArchiveIcon,
   ChevronDownIcon,
@@ -299,6 +300,13 @@ function SettingsRouteView() {
   const queryClient = useQueryClient();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const serverWorktreesQuery = useQuery(serverWorktreesQueryOptions());
+  const ccbModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "ccb",
+      ccbOpenAiBaseUrl: settings.ccbOpenAiBaseUrl,
+      ccbOpenAiApiKey: settings.ccbOpenAiApiKey,
+    }),
+  );
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
   const threads = useStore(useMemo(() => createAllThreadsSelector(), []));
@@ -318,6 +326,7 @@ function SettingsRouteView() {
   const [releaseHistoryOpen, setReleaseHistoryOpen] = useState(false);
   const [openKeybindingsError, setOpenKeybindingsError] = useState<string | null>(null);
   const [openInstallProviders, setOpenInstallProviders] = useState<Record<ProviderKind, boolean>>({
+    ccb: false,
     codex: Boolean(settings.codexBinaryPath || settings.codexHomePath),
     claudeAgent: Boolean(settings.claudeBinaryPath),
     gemini: Boolean(settings.geminiBinaryPath),
@@ -326,10 +335,11 @@ function SettingsRouteView() {
     ),
   });
   const [selectedCustomModelProvider, setSelectedCustomModelProvider] =
-    useState<ProviderKind>("codex");
+    useState<ProviderKind>("ccb");
   const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
     Record<ProviderKind, string>
   >({
+    ccb: "",
     codex: "",
     claudeAgent: "",
     gemini: "",
@@ -404,6 +414,7 @@ function SettingsRouteView() {
   const selectedCustomModelInput = customModelInputByProvider[selectedCustomModelProvider];
   const selectedCustomModelError = customModelErrorByProvider[selectedCustomModelProvider] ?? null;
   const totalCustomModels =
+    settings.customCcbModels.length +
     settings.customCodexModels.length +
     settings.customClaudeModels.length +
     settings.customGeminiModels.length +
@@ -427,6 +438,9 @@ function SettingsRouteView() {
     settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
     settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
     settings.openCodeServerPassword !== defaults.openCodeServerPassword;
+  const isCcbApiSettingsDirty =
+    settings.ccbOpenAiBaseUrl !== defaults.ccbOpenAiBaseUrl ||
+    settings.ccbOpenAiApiKey !== defaults.ccbOpenAiApiKey;
 
   const changedSettingLabels = [
     ...(theme !== "system" ? ["Theme"] : []),
@@ -469,12 +483,14 @@ function SettingsRouteView() {
       ? ["Terminal close confirmation"]
       : []),
     ...(isGitTextGenerationModelDirty ? ["Git writing model"] : []),
-    ...(settings.customCodexModels.length > 0 ||
+    ...(settings.customCcbModels.length > 0 ||
+    settings.customCodexModels.length > 0 ||
     settings.customClaudeModels.length > 0 ||
     settings.customGeminiModels.length > 0 ||
     settings.customOpenCodeModels.length > 0
       ? ["Custom models"]
       : []),
+    ...(isCcbApiSettingsDirty ? ["CCB API"] : []),
     ...(isInstallSettingsDirty ? ["Provider installs"] : []),
   ];
 
@@ -584,13 +600,15 @@ function SettingsRouteView() {
     resetAllThemes();
     resetSettings();
     setOpenInstallProviders({
+      ccb: false,
       codex: false,
       claudeAgent: false,
       gemini: false,
       opencode: false,
     });
-    setSelectedCustomModelProvider("codex");
+    setSelectedCustomModelProvider("ccb");
     setCustomModelInputByProvider({
+      ccb: "",
       codex: "",
       claudeAgent: "",
       gemini: "",
@@ -889,6 +907,7 @@ function SettingsRouteView() {
                 value={settings.defaultProvider}
                 onValueChange={(value) => {
                   if (
+                    value !== "ccb" &&
                     value !== "codex" &&
                     value !== "claudeAgent" &&
                     value !== "gemini" &&
@@ -902,7 +921,8 @@ function SettingsRouteView() {
                 <SelectTrigger className="w-full sm:w-44" aria-label="Default provider">
                   <SelectValue>
                     <span className="flex items-center gap-2">
-                      {settings.defaultProvider === "claudeAgent" ? (
+                      {settings.defaultProvider === "ccb" ||
+                      settings.defaultProvider === "claudeAgent" ? (
                         <ClaudeAI className="size-3.5 text-foreground" />
                       ) : settings.defaultProvider === "gemini" ? (
                         <Gemini className="size-3.5 text-foreground" />
@@ -916,6 +936,12 @@ function SettingsRouteView() {
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="ccb">
+                    <span className="flex items-center gap-2">
+                      <ClaudeAI className="size-3.5 text-foreground" />
+                      CCB
+                    </span>
+                  </SelectItem>
                   <SelectItem hideIndicator value="codex">
                     <span className="flex items-center gap-2">
                       <OpenAI className="size-3.5" />
@@ -1803,6 +1829,54 @@ function SettingsRouteView() {
         </div>
       </SettingsSection>
 
+      <SettingsSection title="CCB runtime models">
+        <div className="space-y-2">
+          <SettingsRow
+            title="Discovered models"
+            description="Models returned by the configured CCB OpenAI-compatible endpoint."
+            status={
+              ccbModelsQuery.isFetching
+                ? "Refreshing model list..."
+                : ccbModelsQuery.isError
+                  ? ccbModelsQuery.error instanceof Error
+                    ? ccbModelsQuery.error.message
+                    : "Could not load CCB models."
+                  : `${ccbModelsQuery.data?.models.length ?? 0} models from ${
+                      ccbModelsQuery.data?.source ?? settings.ccbOpenAiBaseUrl
+                    }`
+            }
+            control={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={ccbModelsQuery.isFetching}
+                onClick={() => void ccbModelsQuery.refetch()}
+              >
+                {ccbModelsQuery.isFetching ? "Refreshing..." : "Refresh"}
+              </Button>
+            }
+          >
+            {ccbModelsQuery.data?.models.length ? (
+              <div className="mt-3 border-t border-border/60">
+                {ccbModelsQuery.data.models.map((model) => (
+                  <div
+                    key={model.slug}
+                    className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border/40 px-4 py-2 last:border-b-0"
+                  >
+                    <span className="min-w-0 truncate text-sm text-foreground">
+                      {model.name}
+                    </span>
+                    <code className="min-w-0 truncate text-xs text-muted-foreground">
+                      {model.slug}
+                    </code>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </SettingsRow>
+        </div>
+      </SettingsSection>
+
       <SettingsSection title="Custom models">
         <div className="space-y-2">
           <SettingsRow
@@ -1814,6 +1888,7 @@ function SettingsRouteView() {
                   label="custom models"
                   onClick={() => {
                     updateSettings({
+                      customCcbModels: defaults.customCcbModels,
                       customCodexModels: defaults.customCodexModels,
                       customClaudeModels: defaults.customClaudeModels,
                       customGeminiModels: defaults.customGeminiModels,
@@ -1832,6 +1907,7 @@ function SettingsRouteView() {
                   value={selectedCustomModelProvider}
                   onValueChange={(value) => {
                     if (
+                      value !== "ccb" &&
                       value !== "codex" &&
                       value !== "claudeAgent" &&
                       value !== "gemini" &&
@@ -1946,6 +2022,65 @@ function SettingsRouteView() {
 
   const renderAdvancedPanel = () => (
     <div className="space-y-6">
+      <SettingsSection title="CCB API">
+        <div className="space-y-2">
+          <SettingsRow
+            title="OpenAI-compatible endpoint"
+            description="Used by CCB model discovery and chat completions."
+            resetAction={
+              isCcbApiSettingsDirty ? (
+                <SettingResetButton
+                  label="CCB API"
+                  onClick={() =>
+                    updateSettings({
+                      ccbOpenAiBaseUrl: defaults.ccbOpenAiBaseUrl,
+                      ccbOpenAiApiKey: defaults.ccbOpenAiApiKey,
+                    })
+                  }
+                />
+              ) : null
+            }
+          >
+            <div className="mt-4 space-y-3 border-t border-border/70 pt-4">
+              <label htmlFor="ccb-openai-base-url" className="block">
+                <span className="block text-xs font-medium text-foreground">Base URL</span>
+                <Input
+                  id="ccb-openai-base-url"
+                  className="mt-1"
+                  value={settings.ccbOpenAiBaseUrl}
+                  onChange={(event) =>
+                    updateSettings({
+                      ccbOpenAiBaseUrl: event.target.value,
+                    })
+                  }
+                  placeholder="http://127.0.0.1:8317/v1"
+                  spellCheck={false}
+                />
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Enter the API root without <code>/models</code>; DP Code appends that path.
+                </span>
+              </label>
+
+              <label htmlFor="ccb-openai-api-key" className="block">
+                <span className="block text-xs font-medium text-foreground">API key</span>
+                <Input
+                  id="ccb-openai-api-key"
+                  className="mt-1"
+                  value={settings.ccbOpenAiApiKey}
+                  onChange={(event) =>
+                    updateSettings({
+                      ccbOpenAiApiKey: event.target.value,
+                    })
+                  }
+                  placeholder="your-api-key-1"
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+          </SettingsRow>
+        </div>
+      </SettingsSection>
+
       <SettingsSection title="Provider installs">
         <div className="space-y-2">
           <SettingsRow
@@ -1966,6 +2101,7 @@ function SettingsRouteView() {
                       openCodeServerPassword: defaults.openCodeServerPassword,
                     });
                     setOpenInstallProviders({
+                      ccb: false,
                       codex: false,
                       claudeAgent: false,
                       gemini: false,

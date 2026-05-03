@@ -125,7 +125,7 @@ function resetComposerDraftStore() {
 }
 
 function modelSelection(
-  provider: "codex" | "claudeAgent" | "opencode",
+  provider: "ccb" | "codex" | "claudeAgent" | "opencode",
   model: string,
   options?: ModelSelection["options"],
 ): ModelSelection {
@@ -160,6 +160,21 @@ describe("resolvePreferredComposerModelSelection", () => {
         effort: "max",
       }),
     );
+  });
+
+  it("preserves a CCB draft selection when there is no explicit active provider", () => {
+    expect(
+      resolvePreferredComposerModelSelection({
+        draft: {
+          modelSelectionByProvider: {
+            ccb: modelSelection("ccb", "openai/gpt-4.1"),
+          },
+          activeProvider: null,
+        },
+        threadModelSelection: modelSelection("codex", "gpt-5"),
+        projectModelSelection: modelSelection("codex", "gpt-5.4"),
+      }),
+    ).toEqual(modelSelection("ccb", "openai/gpt-4.1"));
   });
 });
 
@@ -577,6 +592,46 @@ describe("composerDraftStore terminal contexts", () => {
     expect(mergedState.draftsByThreadId[threadId]).toBeUndefined();
     expect(mergedState.draftThreadsByThreadId).toEqual({});
     expect(mergedState.projectDraftThreadIdByProjectId).toEqual({});
+  });
+
+  it("rehydrates persisted CCB active provider state", () => {
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const mergedState = persistApi.getOptions().merge(
+      {
+        draftsByThreadId: {
+          [threadId]: {
+            prompt: "",
+            modelSelectionByProvider: {
+              ccb: {
+                provider: "ccb",
+                model: "openai/gpt-4.1",
+              },
+            },
+            activeProvider: "ccb",
+          },
+        },
+        draftThreadsByThreadId: {},
+        projectDraftThreadIdByProjectId: {},
+        stickyModelSelectionByProvider: {
+          ccb: {
+            provider: "ccb",
+            model: "openai/gpt-4.1",
+          },
+        },
+        stickyActiveProvider: "ccb",
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+
+    expect(mergedState.draftsByThreadId[threadId]?.activeProvider).toBe("ccb");
+    expect(mergedState.stickyActiveProvider).toBe("ccb");
   });
 });
 
@@ -1036,6 +1091,25 @@ describe("composerDraftStore modelSelection", () => {
     const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
     expect(draft?.modelSelectionByProvider.codex?.options).toEqual({ reasoningEffort: "xhigh" });
     expect(draft?.modelSelectionByProvider.claudeAgent?.options).toEqual({ effort: "max" });
+  });
+
+  it("updates CCB options when applying provider-wide model options", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setModelOptions(
+      threadId,
+      providerModelOptions({
+        ccb: { effort: "high", thinking: true },
+      }),
+    );
+
+    const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
+    expect(draft?.modelSelectionByProvider.ccb).toEqual(
+      modelSelection("ccb", "claude-sonnet-4-6", {
+        effort: "high",
+        thinking: true,
+      }),
+    );
   });
 
   it("preserves other provider options when switching the active model selection", () => {

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
   ProjectId,
   ThreadId,
   type ModelSelection,
@@ -67,6 +68,26 @@ export function buildLocalDraftThread(
     activities: [],
     proposedPlans: [],
   };
+}
+
+export function resolveLocalDraftFallbackModelSelection(input: {
+  projectDefaultModelSelection: ModelSelection | null | undefined;
+  isHomeChatContainer: boolean;
+  defaultProvider: ProviderKind;
+}): ModelSelection {
+  if (input.isHomeChatContainer) {
+    return {
+      provider: input.defaultProvider,
+      model: DEFAULT_MODEL_BY_PROVIDER[input.defaultProvider],
+    };
+  }
+
+  return (
+    input.projectDefaultModelSelection ?? {
+      provider: "codex",
+      model: DEFAULT_MODEL_BY_PROVIDER.codex,
+    }
+  );
 }
 
 export function resolveActiveThreadTitle(input: {

@@ -1,6 +1,7 @@
 import { Option, Schema, SchemaIssue, Struct } from "effect";
 import {
   ClaudeModelOptions,
+  CcbModelOptions,
   CodexModelOptions,
   GeminiModelOptions,
   OpenCodeModelOptions,
@@ -43,7 +44,7 @@ export const ORCHESTRATION_WS_CHANNELS = {
   threadEvent: "orchestration.threadEvent",
 } as const;
 
-export const ProviderKind = Schema.Literals(["codex", "claudeAgent", "gemini", "opencode"]);
+export const ProviderKind = Schema.Literals(["ccb", "codex", "claudeAgent", "gemini", "opencode"]);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -58,7 +59,14 @@ export const ProviderSandboxMode = Schema.Literals([
   "danger-full-access",
 ]);
 export type ProviderSandboxMode = typeof ProviderSandboxMode.Type;
-export const DEFAULT_PROVIDER_KIND: ProviderKind = "codex";
+export const DEFAULT_PROVIDER_KIND: ProviderKind = "ccb";
+
+export const CcbModelSelection = Schema.Struct({
+  provider: Schema.Literal("ccb"),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(CcbModelOptions),
+});
+export type CcbModelSelection = typeof CcbModelSelection.Type;
 
 export const CodexModelSelection = Schema.Struct({
   provider: Schema.Literal("codex"),
@@ -89,12 +97,22 @@ export const OpenCodeModelSelection = Schema.Struct({
 export type OpenCodeModelSelection = typeof OpenCodeModelSelection.Type;
 
 export const ModelSelection = Schema.Union([
+  CcbModelSelection,
   CodexModelSelection,
   ClaudeModelSelection,
   GeminiModelSelection,
   OpenCodeModelSelection,
 ]);
 export type ModelSelection = typeof ModelSelection.Type;
+
+export const CcbProviderStartOptions = Schema.Struct({
+  vendorPath: Schema.optional(TrimmedNonEmptyString),
+  permissionMode: Schema.optional(TrimmedNonEmptyString),
+  fallbackModel: Schema.optional(TrimmedNonEmptyString),
+  openAiBaseUrl: Schema.optional(TrimmedNonEmptyString),
+  openAiApiKey: Schema.optional(TrimmedNonEmptyString),
+});
+export type CcbProviderStartOptions = typeof CcbProviderStartOptions.Type;
 
 export const CodexProviderStartOptions = Schema.Struct({
   binaryPath: Schema.optional(TrimmedNonEmptyString),
@@ -118,6 +136,7 @@ export const OpenCodeProviderStartOptions = Schema.Struct({
 });
 
 export const ProviderStartOptions = Schema.Struct({
+  ccb: Schema.optional(CcbProviderStartOptions),
   codex: Schema.optional(CodexProviderStartOptions),
   claudeAgent: Schema.optional(ClaudeProviderStartOptions),
   gemini: Schema.optional(GeminiProviderStartOptions),

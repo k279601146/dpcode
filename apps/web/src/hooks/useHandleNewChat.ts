@@ -1,5 +1,7 @@
 import { useCallback } from "react";
 
+import { useAppSettings } from "../appSettings";
+import { useAppDefaultModelSelection } from "./useAppDefaultModelSelection";
 import { ensureHomeChatProject } from "../lib/chatProjects";
 import type { NewThreadOptions } from "../lib/threadBootstrap";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -7,6 +9,8 @@ import { useHandleNewThread } from "./useHandleNewThread";
 
 export function useHandleNewChat() {
   const homeDir = useWorkspaceStore((state) => state.homeDir);
+  const { settings } = useAppSettings();
+  const appDefaultModelSelection = useAppDefaultModelSelection(settings);
   const { handleNewThread } = useHandleNewThread();
 
   const handleNewChat = useCallback(
@@ -18,7 +22,7 @@ export function useHandleNewChat() {
         };
       }
 
-      const projectId = await ensureHomeChatProject(homeDir);
+      const projectId = await ensureHomeChatProject(homeDir, appDefaultModelSelection);
       if (!projectId) {
         return {
           ok: false,
@@ -44,7 +48,7 @@ export function useHandleNewChat() {
         };
       }
     },
-    [handleNewThread, homeDir],
+    [appDefaultModelSelection, handleNewThread, homeDir],
   );
 
   return { handleNewChat };

@@ -9,6 +9,8 @@
  * @module ProviderHealthLive
  */
 import * as OS from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   ServerProviderAuthStatus,
   ServerProviderStatus,
@@ -54,11 +56,16 @@ import {
 } from "../providerStatusCache";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+const CCB_PROVIDER = "ccb" as const;
 const CODEX_PROVIDER = "codex" as const;
 const CLAUDE_AGENT_PROVIDER = "claudeAgent" as const;
 const GEMINI_PROVIDER = "gemini" as const;
 const OPENCODE_PROVIDER = "opencode" as const;
 type ProviderStatuses = ReadonlyArray<ServerProviderStatus>;
+const DEFAULT_CCB_VENDOR_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../../CCB-claude-best-t3code",
+);
 
 // ── Pure helpers ────────────────────────────────────────────────────
 
@@ -1196,7 +1203,7 @@ export const ProviderHealthLive = Layer.effect(
     yield* Effect.addFinalizer(() => Scope.close(refreshScope, Exit.void));
 
     const cachePathByProvider = new Map(
-      [CODEX_PROVIDER, CLAUDE_AGENT_PROVIDER, GEMINI_PROVIDER, OPENCODE_PROVIDER].map(
+      [CCB_PROVIDER, CODEX_PROVIDER, CLAUDE_AGENT_PROVIDER, GEMINI_PROVIDER, OPENCODE_PROVIDER].map(
         (provider) =>
           [
             provider,
@@ -1209,7 +1216,7 @@ export const ProviderHealthLive = Layer.effect(
     );
 
     const cachedStatuses: ProviderStatuses = yield* Effect.forEach(
-      [CODEX_PROVIDER, CLAUDE_AGENT_PROVIDER, GEMINI_PROVIDER, OPENCODE_PROVIDER] as const,
+      [CCB_PROVIDER, CODEX_PROVIDER, CLAUDE_AGENT_PROVIDER, GEMINI_PROVIDER, OPENCODE_PROVIDER] as const,
       (provider) =>
         readProviderStatusCache(cachePathByProvider.get(provider)!).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -1241,8 +1248,37 @@ export const ProviderHealthLive = Layer.effect(
 
     const checkClaude = makeCheckClaudeProviderStatus(resolveClaudeSubscription);
 
+    const checkCcbProviderStatus: Effect.Effect<ServerProviderStatus> = Effect.gen(function* () {
+      const checkedAt = new Date().toISOString();
+      const vendorNodeModules = path.join(DEFAULT_CCB_VENDOR_PATH, "node_modules");
+      const depsInstalled = yield* fileSystem.exists(vendorNodeModules).pipe(
+        Effect.orElseSucceed(() => false),
+      );
+      if (!depsInstalled) {
+        return {
+          provider: CCB_PROVIDER,
+          status: "warning" as const,
+          available: true,
+          authStatus: "unknown" as const,
+          checkedAt,
+          message:
+            "CCB is embedded but its vendor dependencies are not installed. Run `bun install` inside CCB-claude-best-t3code before starting CCB sessions.",
+        } satisfies ServerProviderStatus;
+      }
+      return {
+        provider: CCB_PROVIDER,
+        status: "ready" as const,
+        available: true,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message:
+          "CCB is embedded in DPcode; provider authentication is handled by CCB runtime configuration.",
+      } satisfies ServerProviderStatus;
+    });
+
     const loadProviderStatuses = Effect.all(
       [
+        checkCcbProviderStatus,
         checkCodexProviderStatus,
         checkClaude,
         checkGeminiProviderStatus,

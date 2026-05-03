@@ -102,6 +102,7 @@ import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import {
   buildThreadBreadcrumbs,
   enrichSubagentWorkEntries,
+  resolveLocalDraftFallbackModelSelection,
   resolveActiveThreadTitle,
   shouldConsumePendingCustomBinaryConfirmation,
   shouldShowComposerModelBootstrapSkeleton,
@@ -592,7 +593,8 @@ function mergeDynamicModelOptions(input: {
     (model) => !("isCustom" in model) || model.isCustom !== true,
   );
   const missingStaticBuiltIns =
-    input.provider === "opencode" && normalizedDynamicOptions.length > 0
+    (input.provider === "ccb" || input.provider === "opencode") &&
+    normalizedDynamicOptions.length > 0
       ? []
       : staticBuiltInModels.filter((model) => !dynamicNormalizedSlugs.has(model.slug));
 
@@ -872,9 +874,27 @@ export default function ChatView({
     (store) => store.draftThreadsByThreadId[threadId] ?? null,
   );
   const serverThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
+  const homeDir = useWorkspaceStore((state) => state.homeDir);
   const fallbackDraftProjectId = draftThread?.projectId ?? null;
   const fallbackDraftProject = useStore(
     useMemo(() => createProjectSelector(fallbackDraftProjectId), [fallbackDraftProjectId]),
+  );
+  const fallbackDraftProjectIsHomeChatContainer = isHomeChatContainerProject(
+    fallbackDraftProject,
+    homeDir,
+  );
+  const localDraftFallbackModelSelection = useMemo(
+    () =>
+      resolveLocalDraftFallbackModelSelection({
+        projectDefaultModelSelection: fallbackDraftProject?.defaultModelSelection,
+        isHomeChatContainer: fallbackDraftProjectIsHomeChatContainer,
+        defaultProvider: settings.defaultProvider,
+      }),
+    [
+      fallbackDraftProject?.defaultModelSelection,
+      fallbackDraftProjectIsHomeChatContainer,
+      settings.defaultProvider,
+    ],
   );
   const promptRef = useRef(prompt);
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
@@ -1098,14 +1118,11 @@ export default function ChatView({
         ? buildLocalDraftThread(
             threadId,
             draftThread,
-            fallbackDraftProject?.defaultModelSelection ?? {
-              provider: "codex",
-              model: DEFAULT_MODEL_BY_PROVIDER.codex,
-            },
+            localDraftFallbackModelSelection,
             localDraftError,
           )
         : undefined,
-    [draftThread, fallbackDraftProject?.defaultModelSelection, localDraftError, threadId],
+    [draftThread, localDraftFallbackModelSelection, localDraftError, threadId],
   );
   const activeThread = serverThread ?? localDraftThread;
   const runtimeMode =
@@ -1157,7 +1174,6 @@ export default function ChatView({
   const activeProject = useStore(
     useMemo(() => createProjectSelector(activeProjectId), [activeProjectId]),
   );
-  const homeDir = useWorkspaceStore((state) => state.homeDir);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const isHomeChatContainer = isHomeChatContainerProject(activeProject, homeDir);
   const activeProjectDisplayName = isHomeChatContainer
@@ -1355,6 +1371,7 @@ export default function ChatView({
       (projectModelSelection?.provider === provider ? projectModelSelection.model : null);
 
     return {
+      ccb: resolveHint("ccb"),
       codex: resolveHint("codex"),
       claudeAgent: resolveHint("claudeAgent"),
       gemini: resolveHint("gemini"),
@@ -1365,9 +1382,14 @@ export default function ChatView({
     activeThread?.modelSelection,
     composerDraft.modelSelectionByProvider,
   ]);
-  const claudeDynamicModelsQuery = useQuery(
-    providerModelsQueryOptions({ provider: "claudeAgent" }),
+  const ccbDynamicModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "ccb",
+      ccbOpenAiBaseUrl: settings.ccbOpenAiBaseUrl,
+      ccbOpenAiApiKey: settings.ccbOpenAiApiKey,
+    }),
   );
+  const claudeDynamicModelsQuery = useQuery(providerModelsQueryOptions({ provider: "claudeAgent" }));
   const codexDynamicModelsQuery = useQuery(providerModelsQueryOptions({ provider: "codex" }));
   const geminiModelsQuery = useQuery(
     providerModelsQueryOptions({
@@ -1389,6 +1411,11 @@ export default function ChatView({
   const openCodeDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "opencode" }));
   const modelOptionsByProvider = useMemo(() => {
     const staticOptions: Record<ProviderKind, ReturnType<typeof getAppModelOptions>> = {
+      ccb: getAppModelOptions(
+        "ccb",
+        customModelsByProvider.ccb,
+        composerModelHintByProvider.ccb,
+      ).filter((option) => option.isCustom),
       codex: getAppModelOptions(
         "codex",
         customModelsByProvider.codex,
@@ -1416,13 +1443,14 @@ export default function ChatView({
     > = { ...staticOptions };
 
     const dynamicSources: Record<ProviderKind, typeof claudeDynamicModelsQuery.data> = {
+      ccb: ccbDynamicModelsQuery.data,
       claudeAgent: claudeDynamicModelsQuery.data,
       codex: codexDynamicModelsQuery.data,
       gemini: geminiModelsQuery.data,
       opencode: openCodeDynamicModelsQuery.data,
     };
 
-    for (const provider of ["claudeAgent", "codex", "gemini", "opencode"] as const) {
+    for (const provider of ["ccb", "claudeAgent", "codex", "gemini", "opencode"] as const) {
       const dynamicModels = dynamicSources[provider]?.models;
       if (dynamicModels && dynamicModels.length > 0) {
         result[provider] = mergeDynamicModelOptions({
@@ -1444,6 +1472,7 @@ export default function ChatView({
 
     return result;
   }, [
+    ccbDynamicModelsQuery.data,
     claudeDynamicModelsQuery.data,
     composerModelHintByProvider,
     codexDynamicModelsQuery.data,
@@ -1461,12 +1490,14 @@ export default function ChatView({
   });
   const runtimeModelsByProvider = useMemo(
     () => ({
+      ccb: ccbDynamicModelsQuery.data?.models ?? [],
       claudeAgent: claudeDynamicModelsQuery.data?.models ?? [],
       codex: codexDynamicModelsQuery.data?.models ?? [],
       gemini: geminiModelsQuery.data?.models ?? [],
       opencode: openCodeDynamicModelsQuery.data?.models ?? [],
     }),
     [
+      ccbDynamicModelsQuery.data?.models,
       claudeDynamicModelsQuery.data?.models,
       codexDynamicModelsQuery.data?.models,
       geminiModelsQuery.data?.models,
@@ -1474,6 +1505,7 @@ export default function ChatView({
     ],
   );
   const providerModelsQueryByProvider = {
+    ccb: ccbDynamicModelsQuery,
     claudeAgent: claudeDynamicModelsQuery,
     codex: codexDynamicModelsQuery,
     gemini: geminiModelsQuery,
@@ -6040,7 +6072,6 @@ export default function ChatView({
 
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
-      if (!activeThread) return;
       if (lockedProvider !== null && provider !== lockedProvider) {
         scheduleComposerFocus();
         return;
@@ -6050,17 +6081,17 @@ export default function ChatView({
         provider,
         model: resolvedModel,
       };
-      setComposerDraftModelSelection(activeThread.id, nextModelSelection);
+      setComposerDraftModelSelection(threadId, nextModelSelection);
       setStickyComposerModelSelection(nextModelSelection);
       scheduleComposerFocus();
     },
     [
-      activeThread,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
       setStickyComposerModelSelection,
       customModelsByProvider,
+      threadId,
     ],
   );
   const setPromptFromTraits = useCallback(

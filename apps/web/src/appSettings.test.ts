@@ -292,6 +292,7 @@ describe("getProviderStartOptions", () => {
 
 describe("provider-indexed custom model settings", () => {
   const settings = {
+    customCcbModels: ["openai/custom-ccb-model"],
     customCodexModels: ["custom/codex-model"],
     customClaudeModels: ["claude/custom-opus"],
     customGeminiModels: ["gemini/custom-flash"],
@@ -300,6 +301,7 @@ describe("provider-indexed custom model settings", () => {
 
   it("exports one provider config per provider", () => {
     expect(MODEL_PROVIDER_SETTINGS.map((config) => config.provider)).toEqual([
+      "ccb",
       "codex",
       "claudeAgent",
       "gemini",
@@ -308,6 +310,7 @@ describe("provider-indexed custom model settings", () => {
   });
 
   it("reads custom models for each provider", () => {
+    expect(getCustomModelsForProvider(settings, "ccb")).toEqual(["openai/custom-ccb-model"]);
     expect(getCustomModelsForProvider(settings, "codex")).toEqual(["custom/codex-model"]);
     expect(getCustomModelsForProvider(settings, "claudeAgent")).toEqual(["claude/custom-opus"]);
     expect(getCustomModelsForProvider(settings, "gemini")).toEqual(["gemini/custom-flash"]);
@@ -316,18 +319,28 @@ describe("provider-indexed custom model settings", () => {
 
   it("reads default custom models for each provider", () => {
     const defaults = {
+      customCcbModels: ["openai/default-ccb-model"],
       customCodexModels: ["default/codex-model"],
       customClaudeModels: ["claude/default-opus"],
       customGeminiModels: ["gemini/default-flash"],
       customOpenCodeModels: ["openai/gpt-5"],
     } as const;
 
+    expect(getDefaultCustomModelsForProvider(defaults, "ccb")).toEqual([
+      "openai/default-ccb-model",
+    ]);
     expect(getDefaultCustomModelsForProvider(defaults, "codex")).toEqual(["default/codex-model"]);
     expect(getDefaultCustomModelsForProvider(defaults, "claudeAgent")).toEqual([
       "claude/default-opus",
     ]);
     expect(getDefaultCustomModelsForProvider(defaults, "gemini")).toEqual(["gemini/default-flash"]);
     expect(getDefaultCustomModelsForProvider(defaults, "opencode")).toEqual(["openai/gpt-5"]);
+  });
+
+  it("patches custom models for ccb", () => {
+    expect(patchCustomModels("ccb", ["openai/custom-ccb-model"])).toEqual({
+      customCcbModels: ["openai/custom-ccb-model"],
+    });
   });
 
   it("patches custom models for codex", () => {
@@ -356,6 +369,7 @@ describe("provider-indexed custom model settings", () => {
 
   it("builds a complete provider-indexed custom model record", () => {
     expect(getCustomModelsByProvider(settings)).toEqual({
+      ccb: ["openai/custom-ccb-model"],
       codex: ["custom/codex-model"],
       claudeAgent: ["claude/custom-opus"],
       gemini: ["gemini/custom-flash"],
@@ -366,6 +380,9 @@ describe("provider-indexed custom model settings", () => {
   it("builds provider-indexed model options including custom models", () => {
     const modelOptionsByProvider = getCustomModelOptionsByProvider(settings);
 
+    expect(
+      modelOptionsByProvider.ccb.some((option) => option.slug === "openai/custom-ccb-model"),
+    ).toBe(true);
     expect(
       modelOptionsByProvider.codex.some((option) => option.slug === "custom/codex-model"),
     ).toBe(true);
@@ -382,6 +399,7 @@ describe("provider-indexed custom model settings", () => {
 
   it("normalizes and deduplicates custom model options per provider", () => {
     const modelOptionsByProvider = getCustomModelOptionsByProvider({
+      customCcbModels: [" openai/gpt-5.1 ", "openai/custom-ccb-model", "openai/custom-ccb-model"],
       customCodexModels: ["  custom/codex-model ", "gpt-5.4", "custom/codex-model"],
       customClaudeModels: [" sonnet ", "claude/custom-opus", "claude/custom-opus"],
       customGeminiModels: [" auto-gemini-3 ", "gemini/custom-flash", "gemini/custom-flash"],
@@ -392,6 +410,9 @@ describe("provider-indexed custom model settings", () => {
       ],
     });
 
+    expect(
+      modelOptionsByProvider.ccb.filter((option) => option.slug === "openai/custom-ccb-model"),
+    ).toHaveLength(1);
     expect(
       modelOptionsByProvider.codex.filter((option) => option.slug === "custom/codex-model"),
     ).toHaveLength(1);
@@ -438,6 +459,7 @@ describe("AppSettingsSchema", () => {
       sidebarProjectSortOrder: DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
       sidebarThreadSortOrder: DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
       timestampFormat: DEFAULT_TIMESTAMP_FORMAT,
+      customCcbModels: [],
       customCodexModels: [],
       customClaudeModels: [],
       customGeminiModels: [],

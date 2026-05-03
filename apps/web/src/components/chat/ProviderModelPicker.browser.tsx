@@ -7,6 +7,10 @@ import { ProviderModelPicker } from "./ProviderModelPicker";
 import type { ProviderModelOption } from "../../providerModelOptions";
 
 const MODEL_OPTIONS_BY_PROVIDER = {
+  ccb: [
+    { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+    { slug: "claude-opus-4-7", name: "Claude Opus 4.7" },
+  ],
   claudeAgent: [
     { slug: "claude-opus-4-6", name: "Claude Opus 4.6" },
     { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
@@ -98,10 +102,10 @@ describe("ProviderModelPicker", () => {
     localStorage.clear();
   });
 
-  it("shows provider submenus when provider switching is allowed", async () => {
+  it("shows only the CCB provider submenu when provider switching is allowed", async () => {
     const mounted = await mountPicker({
-      provider: "claudeAgent",
-      model: "claude-opus-4-6",
+      provider: "ccb",
+      model: "claude-sonnet-4-6",
       lockedProvider: null,
     });
 
@@ -110,8 +114,8 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         const text = document.body.textContent ?? "";
-        expect(text).toContain("Codex");
-        expect(text).toContain("Claude");
+        expect(text).toContain("CCB");
+        expect(text).not.toContain("Codex");
         expect(text).not.toContain("Claude Sonnet 4.6");
       });
     } finally {
@@ -272,10 +276,10 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("shows unavailable providers as disabled rows", async () => {
+  it("hides legacy providers even when provider health includes them", async () => {
     const mounted = await mountPicker({
-      provider: "codex",
-      model: "gpt-5-codex",
+      provider: "ccb",
+      model: "claude-sonnet-4-6",
       lockedProvider: null,
       providers: [
         {
@@ -300,19 +304,19 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         const text = document.body.textContent ?? "";
-        expect(text).toContain("Codex");
-        expect(text).toContain("Claude");
-        expect(text).toContain("Sign in");
+        expect(text).toContain("CCB");
+        expect(text).not.toContain("Codex");
+        expect(text).not.toContain("Sign in");
       });
     } finally {
       await mounted.cleanup();
     }
   });
 
-  it("keeps warning providers selectable when they are still available", async () => {
+  it("keeps CCB selectable while legacy warning providers stay hidden", async () => {
     const mounted = await mountPicker({
-      provider: "codex",
-      model: "gpt-5-codex",
+      provider: "ccb",
+      model: "claude-sonnet-4-6",
       lockedProvider: null,
       providers: [
         {
@@ -337,7 +341,9 @@ describe("ProviderModelPicker", () => {
       await page.getByRole("button").click();
 
       await vi.waitFor(() => {
-        expect(document.body.textContent ?? "").toContain("Claude");
+        const text = document.body.textContent ?? "";
+        expect(text).toContain("CCB");
+        expect(text).not.toContain("Claude");
       });
 
       await expect.element(page.getByText("Sign in")).not.toBeInTheDocument();

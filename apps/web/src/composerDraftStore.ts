@@ -661,7 +661,11 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
 }
 
 function normalizeProviderKind(value: unknown): ProviderKind | null {
-  return value === "codex" || value === "claudeAgent" || value === "gemini" || value === "opencode"
+  return value === "ccb" ||
+    value === "codex" ||
+    value === "claudeAgent" ||
+    value === "gemini" ||
+    value === "opencode"
     ? value
     : null;
 }
@@ -680,6 +684,14 @@ function makeModelSelection(
   options?: ProviderModelOptions[ProviderKind],
 ): ModelSelection {
   switch (provider) {
+    case "ccb":
+      return {
+        provider,
+        model,
+        ...(options
+          ? { options: options as Extract<ModelSelection, { provider: "ccb" }>["options"] }
+          : {}),
+      };
     case "codex":
       return {
         provider,
@@ -723,6 +735,10 @@ function normalizeProviderModelOptions(
   legacy?: LegacyCodexFields,
 ): ProviderModelOptions | null {
   const candidate = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  const ccbCandidate =
+    candidate?.ccb && typeof candidate.ccb === "object"
+      ? (candidate.ccb as Record<string, unknown>)
+      : null;
   const codexCandidate =
     candidate?.codex && typeof candidate.codex === "object"
       ? (candidate.codex as Record<string, unknown>)
@@ -795,6 +811,39 @@ function normalizeProviderModelOptions(
     typeof claudeCandidate?.contextWindow === "string" && claudeCandidate.contextWindow.length > 0
       ? claudeCandidate.contextWindow
       : undefined;
+  const ccbThinking =
+    ccbCandidate?.thinking === true ? true : ccbCandidate?.thinking === false ? false : undefined;
+  const ccbEffort: ClaudeCodeEffort | undefined =
+    ccbCandidate?.effort === "low" ||
+    ccbCandidate?.effort === "medium" ||
+    ccbCandidate?.effort === "high" ||
+    ccbCandidate?.effort === "xhigh" ||
+    ccbCandidate?.effort === "max" ||
+    ccbCandidate?.effort === "ultrathink"
+      ? ccbCandidate.effort
+      : undefined;
+  const ccbFastMode =
+    ccbCandidate?.fastMode === true
+      ? true
+      : ccbCandidate?.fastMode === false
+        ? false
+        : undefined;
+  const ccbContextWindow =
+    typeof ccbCandidate?.contextWindow === "string" && ccbCandidate.contextWindow.length > 0
+      ? ccbCandidate.contextWindow
+      : undefined;
+  const ccb =
+    ccbThinking !== undefined ||
+    ccbEffort !== undefined ||
+    ccbFastMode !== undefined ||
+    ccbContextWindow !== undefined
+      ? {
+          ...(ccbThinking !== undefined ? { thinking: ccbThinking } : {}),
+          ...(ccbEffort !== undefined ? { effort: ccbEffort } : {}),
+          ...(ccbFastMode !== undefined ? { fastMode: ccbFastMode } : {}),
+          ...(ccbContextWindow !== undefined ? { contextWindow: ccbContextWindow } : {}),
+        }
+      : undefined;
   const claude =
     claudeThinking !== undefined ||
     claudeEffort !== undefined ||
@@ -840,10 +889,11 @@ function normalizeProviderModelOptions(
           ...(openCodeAgent !== undefined ? { agent: openCodeAgent } : {}),
         }
       : undefined;
-  if (!codex && !claude && !gemini && !opencode) {
+  if (!ccb && !codex && !claude && !gemini && !opencode) {
     return null;
   }
   return {
+    ...(ccb ? { ccb } : {}),
     ...(codex ? { codex } : {}),
     ...(claude ? { claudeAgent: claude } : {}),
     ...(gemini ? { gemini } : {}),
@@ -870,7 +920,9 @@ function normalizeModelSelection(
     return null;
   }
   const inferredClaudeContextWindow =
-    provider === "claudeAgent" && /\[1m\]$/iu.test(rawModel) ? "1m" : undefined;
+    (provider === "ccb" || provider === "claudeAgent") && /\[1m\]$/iu.test(rawModel)
+      ? "1m"
+      : undefined;
   const model = normalizeModelSlug(rawModel, provider);
   if (!model) {
     return null;
@@ -881,7 +933,14 @@ function normalizeModelSelection(
     provider === "codex" ? legacy?.legacyCodex : undefined,
   );
   const options =
-    provider === "codex"
+    provider === "ccb"
+      ? inferredClaudeContextWindow !== undefined
+        ? {
+            ...modelOptions?.ccb,
+            contextWindow: modelOptions?.ccb?.contextWindow ?? inferredClaudeContextWindow,
+          }
+        : modelOptions?.ccb
+      : provider === "codex"
       ? modelOptions?.codex
       : provider === "claudeAgent"
         ? inferredClaudeContextWindow !== undefined
@@ -953,7 +1012,7 @@ function legacyToModelSelectionByProvider(
   const result: Partial<Record<ProviderKind, ModelSelection>> = {};
   // Add entries from the options bag (for non-active providers)
   if (modelOptions) {
-    for (const provider of ["codex", "claudeAgent", "gemini", "opencode"] as const) {
+    for (const provider of ["ccb", "codex", "claudeAgent", "gemini", "opencode"] as const) {
       const options = modelOptions[provider];
       if (options && Object.keys(options).length > 0) {
         result[provider] = makeModelSelection(
@@ -1057,7 +1116,7 @@ export function resolvePreferredComposerModelSelection(input: {
   defaultProvider?: ProviderKind | null | undefined;
 }): ModelSelection {
   const draftProviderWithSelection =
-    (["codex", "claudeAgent", "gemini", "opencode"] as const).find(
+    (["ccb", "codex", "claudeAgent", "gemini", "opencode"] as const).find(
       (provider) => input.draft?.modelSelectionByProvider?.[provider] !== undefined,
     ) ?? null;
   const preferredProvider =
@@ -2541,7 +2600,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           }
           const base = existing ?? createEmptyThreadDraft();
           const nextMap = { ...base.modelSelectionByProvider };
-          for (const provider of ["codex", "claudeAgent", "gemini", "opencode"] as const) {
+          for (const provider of ["ccb", "codex", "claudeAgent", "gemini", "opencode"] as const) {
             // Only touch providers explicitly present in the input
             if (!normalizedOpts || !(provider in normalizedOpts)) continue;
             const opts = normalizedOpts[provider];

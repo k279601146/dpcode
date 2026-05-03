@@ -10,6 +10,7 @@ import { ServerProviderStatus } from "@t3tools/contracts";
 import { Cause, Effect, FileSystem, Path, Schema } from "effect";
 
 const PROVIDER_STATUS_CACHE_IDS = [
+  "ccb",
   "codex",
   "claudeAgent",
   "gemini",

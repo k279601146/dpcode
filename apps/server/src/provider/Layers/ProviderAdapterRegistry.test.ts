@@ -8,6 +8,7 @@ import { ClaudeAdapter, ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts"
 import { CodexAdapter, CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { GeminiAdapter, GeminiAdapterShape } from "../Services/GeminiAdapter.ts";
 import { OpenCodeAdapter, OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { CcbAdapter, CcbAdapterShape } from "../Services/CcbAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderAdapterRegistryLive } from "./ProviderAdapterRegistry.ts";
 import { ProviderUnsupportedError } from "../Errors.ts";
@@ -15,6 +16,23 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 
 const fakeCodexAdapter: CodexAdapterShape = {
   provider: "codex",
+  capabilities: { sessionModelSwitch: "in-session" },
+  startSession: vi.fn(),
+  sendTurn: vi.fn(),
+  interruptTurn: vi.fn(),
+  respondToRequest: vi.fn(),
+  respondToUserInput: vi.fn(),
+  stopSession: vi.fn(),
+  listSessions: vi.fn(),
+  hasSession: vi.fn(),
+  readThread: vi.fn(),
+  rollbackThread: vi.fn(),
+  stopAll: vi.fn(),
+  streamEvents: Stream.empty,
+};
+
+const fakeCcbAdapter: CcbAdapterShape = {
+  provider: "ccb",
   capabilities: { sessionModelSwitch: "in-session" },
   startSession: vi.fn(),
   sendTurn: vi.fn(),
@@ -86,6 +104,7 @@ const layer = it.layer(
     Layer.provide(
       ProviderAdapterRegistryLive,
       Layer.mergeAll(
+        Layer.succeed(CcbAdapter, fakeCcbAdapter),
         Layer.succeed(CodexAdapter, fakeCodexAdapter),
         Layer.succeed(ClaudeAdapter, fakeClaudeAdapter),
         Layer.succeed(GeminiAdapter, fakeGeminiAdapter),
@@ -100,17 +119,19 @@ layer("ProviderAdapterRegistryLive", (it) => {
   it.effect("resolves a registered provider adapter", () =>
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry;
+      const ccb = yield* registry.getByProvider("ccb");
       const codex = yield* registry.getByProvider("codex");
       const claude = yield* registry.getByProvider("claudeAgent");
       const gemini = yield* registry.getByProvider("gemini");
       const opencode = yield* registry.getByProvider("opencode");
+      assert.equal(ccb, fakeCcbAdapter);
       assert.equal(codex, fakeCodexAdapter);
       assert.equal(claude, fakeClaudeAdapter);
       assert.equal(gemini, fakeGeminiAdapter);
       assert.equal(opencode, fakeOpenCodeAdapter);
 
       const providers = yield* registry.listProviders();
-      assert.deepEqual(providers, ["codex", "claudeAgent", "gemini", "opencode"]);
+      assert.deepEqual(providers, ["ccb", "codex", "claudeAgent", "gemini", "opencode"]);
     }),
   );
 

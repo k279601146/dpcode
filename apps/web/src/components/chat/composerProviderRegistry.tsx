@@ -114,6 +114,12 @@ function getProviderStateFromCapabilities(
   let normalizedOptions: ProviderModelOptions[ProviderKind] | undefined;
 
   switch (provider) {
+    case "ccb": {
+      const providerOptions = modelOptions?.ccb;
+      rawEffort = trimOrNull(providerOptions?.effort);
+      normalizedOptions = normalizeClaudeModelOptions(model, providerOptions);
+      break;
+    }
     case "codex": {
       const providerOptions = modelOptions?.codex;
       rawEffort = trimOrNull(providerOptions?.reasoningEffort);
@@ -194,6 +200,11 @@ function getProviderStateFromCapabilities(
 }
 
 const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
+  ccb: {
+    getState: (input) => getProviderStateFromCapabilities(input),
+    renderTraitsMenuContent: (input) => renderTraitsMenuContentForProvider("ccb", input),
+    renderTraitsPicker: (input) => renderTraitsPickerForProvider("ccb", input),
+  },
   codex: {
     getState: (input) => getProviderStateFromCapabilities(input),
     renderTraitsMenuContent: (input) => renderTraitsMenuContentForProvider("codex", input),

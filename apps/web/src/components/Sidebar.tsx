@@ -125,6 +125,7 @@ import {
 } from "./SidebarSearchPalette";
 import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useAppDefaultModelSelection } from "../hooks/useAppDefaultModelSelection";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { toastManager } from "./ui/toast";
@@ -1126,6 +1127,7 @@ export default function Sidebar() {
   const isOnSettings = useLocation({ select: (loc) => loc.pathname === "/settings" });
   const isOnWorkspace = pathname.startsWith("/workspace");
   const { settings: appSettings, updateSettings } = useAppSettings();
+  const appDefaultModelSelection = useAppDefaultModelSelection(appSettings);
   const { handleNewThread } = useHandleNewThread();
   const { handleNewChat } = useHandleNewChat();
   const { createThreadHandoff } = useThreadHandoff();
@@ -1749,8 +1751,8 @@ export default function Sidebar() {
     if (!homeDir) {
       return;
     }
-    prewarmHomeChatProject(homeDir);
-  }, [homeDir]);
+    prewarmHomeChatProject(homeDir, appDefaultModelSelection);
+  }, [appDefaultModelSelection, homeDir]);
 
   // Opens a fresh home-chat draft directly on the draft thread route so the first send
   // does not need a second route swap from "/" to "/$threadId".

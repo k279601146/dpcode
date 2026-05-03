@@ -19,6 +19,7 @@ import {
 import { newCommandId, newThreadId } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
 import { useFocusedChatContext } from "../focusedChatContext";
+import { useAppDefaultModelSelection } from "./useAppDefaultModelSelection";
 import { useStore } from "../store";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
 import { useTerminalStateStore } from "../terminalStateStore";
@@ -27,6 +28,7 @@ import { getThreadFromState } from "../threadDerivation";
 export function useHandleNewThread() {
   const projects = useStore((store) => store.projects);
   const { settings } = useAppSettings();
+  const appDefaultModelSelection = useAppDefaultModelSelection(settings);
   const navigate = useNavigate();
   const { activeDraftThread, activeProjectId, activeThread, focusedThreadId, routeThreadId } =
     useFocusedChatContext();
@@ -38,13 +40,23 @@ export function useHandleNewThread() {
     (projectId: ProjectId, options?: NewThreadOptions): Promise<void> => {
       const entryPoint = options?.entryPoint ?? "chat";
       const wantsTemporaryThread = options?.temporary === true;
-      const applyProviderOverride = (threadId: ThreadId) => {
-        if (!options?.provider) {
+      const ensureDraftProviderSelection = (threadId: ThreadId) => {
+        const { draftsByThreadId, setModelSelection } = useComposerDraftStore.getState();
+        const draftState = draftsByThreadId[threadId] ?? null;
+        const hasDraftSelection =
+          draftState?.activeProvider != null ||
+          Object.keys(draftState?.modelSelectionByProvider ?? {}).length > 0;
+        if (!options?.provider && hasDraftSelection) {
           return;
         }
         setModelSelection(threadId, {
-          provider: options.provider,
-          model: DEFAULT_MODEL_BY_PROVIDER[options.provider],
+          provider: options?.provider ?? appDefaultModelSelection.provider,
+          model:
+            options?.provider === undefined
+              ? appDefaultModelSelection.model
+              : options.provider === appDefaultModelSelection.provider
+                ? appDefaultModelSelection.model
+                : DEFAULT_MODEL_BY_PROVIDER[options.provider],
         });
       };
       const restoreComposerDraft = (
@@ -80,7 +92,6 @@ export function useHandleNewThread() {
         applyStickyState,
         setDraftThreadContext,
         setProjectDraftThreadId,
-        setModelSelection,
       } = useComposerDraftStore.getState();
       const shouldForceFreshThread = options?.fresh === true;
 
@@ -183,9 +194,9 @@ export function useHandleNewThread() {
             setDraftThreadContext(bootstrapPlan.threadId, draftContextPatch);
             resolvedStoredDraftThread = getDraftThread(bootstrapPlan.threadId);
           }
-          applyProviderOverride(bootstrapPlan.threadId);
           setProjectDraftThreadId(projectId, bootstrapPlan.threadId, { entryPoint });
           restoreComposerDraft(bootstrapPlan.threadId, preservedComposerDraft);
+          ensureDraftProviderSelection(bootstrapPlan.threadId);
           activateThreadEntryPoint(bootstrapPlan.threadId);
           if (focusedThreadId === bootstrapPlan.threadId) {
             if (entryPoint === "terminal") {
@@ -205,6 +216,7 @@ export function useHandleNewThread() {
             params: { threadId: bootstrapPlan.threadId },
           });
           restoreComposerDraft(bootstrapPlan.threadId, preservedComposerDraft);
+          ensureDraftProviderSelection(bootstrapPlan.threadId);
           if (entryPoint === "terminal") {
             await createTerminalThread(
               bootstrapPlan.threadId,
@@ -232,9 +244,9 @@ export function useHandleNewThread() {
           setDraftThreadContext(bootstrapPlan.threadId, draftContextPatch);
           resolvedActiveDraftThread = getDraftThread(bootstrapPlan.threadId);
         }
-        applyProviderOverride(bootstrapPlan.threadId);
         setProjectDraftThreadId(projectId, bootstrapPlan.threadId, { entryPoint });
         restoreComposerDraft(bootstrapPlan.threadId, preservedComposerDraft);
+        ensureDraftProviderSelection(bootstrapPlan.threadId);
         activateThreadEntryPoint(bootstrapPlan.threadId);
         if (entryPoint === "terminal") {
           return createTerminalThread(
@@ -260,7 +272,7 @@ export function useHandleNewThread() {
         });
         activateThreadEntryPoint(threadId);
         applyStickyState(threadId);
-        applyProviderOverride(threadId);
+        ensureDraftProviderSelection(threadId);
 
         await navigate({
           to: "/$threadId",
@@ -282,6 +294,7 @@ export function useHandleNewThread() {
       openTerminalThreadPage,
       focusedThreadId,
       markTemporaryThread,
+      appDefaultModelSelection,
       settings.defaultProvider,
     ],
   );

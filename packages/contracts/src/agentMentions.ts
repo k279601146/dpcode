@@ -22,7 +22,7 @@ export interface CodexAgentAliasDefinition extends BaseAgentAliasDefinition {
 }
 
 export interface ClaudeSubagentAliasDefinition extends BaseAgentAliasDefinition {
-  readonly provider: "claudeAgent";
+  readonly provider: "ccb" | "claudeAgent";
   readonly kind: "claude-subagent";
   readonly agentName: string;
   readonly description: string;
@@ -211,6 +211,12 @@ export const AGENT_MENTION_ALIASES_BY_PROVIDER: Record<
   ProviderKind,
   Record<string, AgentAliasDefinition>
 > = {
+  ccb: Object.fromEntries(
+    Object.entries(CLAUDE_AGENT_MENTION_ALIASES).map(([alias, definition]) => [
+      alias,
+      { ...definition, provider: "ccb" as const },
+    ]),
+  ),
   codex: CODEX_AGENT_MENTION_ALIASES,
   claudeAgent: CLAUDE_AGENT_MENTION_ALIASES,
   gemini: {},
@@ -224,6 +230,7 @@ export const AGENT_MENTION_ALIASES: Record<string, AgentAliasDefinition> = Objec
 );
 
 const AGENT_MENTION_AUTOCOMPLETE_ALIASES_BY_PROVIDER: Record<ProviderKind, readonly string[]> = {
+  ccb: ["explore", "review", "build", "plan"],
   codex: ["5.5", "5.4", "mini", "5.3-codex", "spark", "5.2", "5.2-codex"],
   claudeAgent: ["explore", "review", "build", "plan"],
   gemini: [],

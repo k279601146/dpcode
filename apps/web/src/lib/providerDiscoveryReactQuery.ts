@@ -56,8 +56,12 @@ export const providerDiscoveryQueryKeys = {
     ["provider-discovery", "plugins", provider, cwd] as const,
   plugin: (provider: ProviderKind, marketplacePath: string, pluginName: string) =>
     ["provider-discovery", "plugin", provider, marketplacePath, pluginName] as const,
-  models: (provider: ProviderKind, binaryPath: string | null) =>
-    ["provider-discovery", "models", provider, binaryPath] as const,
+  models: (
+    provider: ProviderKind,
+    binaryPath: string | null,
+    endpoint: string | null,
+    apiKey: string | null,
+  ) => ["provider-discovery", "models", provider, binaryPath, endpoint, apiKey] as const,
   agents: (provider: ProviderKind) => ["provider-discovery", "agents", provider] as const,
 };
 
@@ -127,15 +131,24 @@ export function providerCommandsQueryOptions(input: {
 export function providerModelsQueryOptions(input: {
   provider: ProviderKind;
   binaryPath?: string | null;
+  ccbOpenAiBaseUrl?: string | null;
+  ccbOpenAiApiKey?: string | null;
   enabled?: boolean;
 }) {
   return queryOptions({
-    queryKey: providerDiscoveryQueryKeys.models(input.provider, input.binaryPath ?? null),
+    queryKey: providerDiscoveryQueryKeys.models(
+      input.provider,
+      input.binaryPath ?? null,
+      input.provider === "ccb" ? (input.ccbOpenAiBaseUrl ?? null) : null,
+      input.provider === "ccb" ? (input.ccbOpenAiApiKey ?? null) : null,
+    ),
     queryFn: async () => {
       const api = ensureNativeApi();
       return api.provider.listModels({
         provider: input.provider,
         ...(input.binaryPath ? { binaryPath: input.binaryPath } : {}),
+        ...(input.ccbOpenAiBaseUrl ? { ccbOpenAiBaseUrl: input.ccbOpenAiBaseUrl } : {}),
+        ...(input.ccbOpenAiApiKey ? { ccbOpenAiApiKey: input.ccbOpenAiApiKey } : {}),
       });
     },
     enabled: input.enabled ?? true,

@@ -1,5 +1,7 @@
 import { formatModelDisplayName } from "@t3tools/shared/model";
 import type {
+  CcbModelOptions,
+  CcbModelSelection,
   ClaudeModelOptions,
   ClaudeModelSelection,
   CodexModelOptions,
@@ -148,8 +150,9 @@ export function buildNextProviderOptions(
   if (provider === "codex") {
     return { ...(modelOptions as CodexModelOptions | undefined), ...patch } as CodexModelOptions;
   }
-  if (provider === "claudeAgent") {
-    return { ...(modelOptions as ClaudeModelOptions | undefined), ...patch } as ClaudeModelOptions;
+  if (provider === "ccb" || provider === "claudeAgent") {
+    return { ...(modelOptions as CcbModelOptions | ClaudeModelOptions | undefined), ...patch } as
+      CcbModelOptions | ClaudeModelOptions;
   }
   if (provider === "gemini") {
     return {
@@ -165,6 +168,11 @@ export function buildNextProviderOptions(
   } as OpenCodeModelOptions;
 }
 
+export function buildModelSelection(
+  provider: "ccb",
+  model: string,
+  options?: CcbModelOptions | null | undefined,
+): CcbModelSelection;
 export function buildModelSelection(
   provider: "codex",
   model: string,
@@ -196,6 +204,14 @@ export function buildModelSelection(
   options?: ProviderOptions | null | undefined,
 ): ModelSelection {
   switch (provider) {
+    case "ccb":
+      return options
+        ? {
+            provider,
+            model,
+            options: options as CcbModelOptions,
+          }
+        : { provider, model };
     case "codex":
       return options
         ? {

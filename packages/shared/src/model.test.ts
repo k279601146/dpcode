@@ -79,6 +79,10 @@ describe("resolveModelSlug", () => {
   });
 
   it("supports provider-aware resolution", () => {
+    expect(resolveModelSlugForProvider("ccb", undefined)).toBe(DEFAULT_MODEL_BY_PROVIDER.ccb);
+    expect(resolveModelSlugForProvider("ccb", DEFAULT_MODEL_BY_PROVIDER.ccb)).toBe(
+      DEFAULT_MODEL_BY_PROVIDER.ccb,
+    );
     expect(resolveModelSlugForProvider("claudeAgent", undefined)).toBe(
       DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
     );

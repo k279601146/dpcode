@@ -15,6 +15,7 @@ import {
   ProviderAdapterRegistry,
   type ProviderAdapterRegistryShape,
 } from "../Services/ProviderAdapterRegistry.ts";
+import { CcbAdapter } from "../Services/CcbAdapter.ts";
 import { ClaudeAdapter } from "../Services/ClaudeAdapter.ts";
 import { CodexAdapter } from "../Services/CodexAdapter.ts";
 import { GeminiAdapter } from "../Services/GeminiAdapter.ts";
@@ -29,7 +30,13 @@ const makeProviderAdapterRegistry = (options?: ProviderAdapterRegistryLiveOption
     const adapters =
       options?.adapters !== undefined
         ? options.adapters
-        : [yield* CodexAdapter, yield* ClaudeAdapter, yield* GeminiAdapter, yield* OpenCodeAdapter];
+        : [
+            yield* CcbAdapter,
+            yield* CodexAdapter,
+            yield* ClaudeAdapter,
+            yield* GeminiAdapter,
+            yield* OpenCodeAdapter,
+          ];
     const byProvider = new Map(adapters.map((adapter) => [adapter.provider, adapter]));
 
     const getByProvider: ProviderAdapterRegistryShape["getByProvider"] = (provider) => {

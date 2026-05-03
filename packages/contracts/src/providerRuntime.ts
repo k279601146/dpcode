@@ -18,6 +18,8 @@ const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
 
 const RuntimeEventRawSource = Schema.Literals([
+  "ccb.sdk.message",
+  "ccb.sdk.permission",
   "codex.app-server.notification",
   "codex.app-server.request",
   "codex.eventmsg",

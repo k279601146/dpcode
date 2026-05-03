@@ -38,6 +38,9 @@ export const ClaudeModelOptions = Schema.Struct({
 });
 export type ClaudeModelOptions = typeof ClaudeModelOptions.Type;
 
+export const CcbModelOptions = ClaudeModelOptions;
+export type CcbModelOptions = ClaudeModelOptions;
+
 export const GeminiModelOptions = Schema.Struct({
   thinkingLevel: Schema.optional(Schema.Literals(GEMINI_THINKING_LEVEL_OPTIONS)),
   thinkingBudget: Schema.optional(Schema.Literals(GEMINI_THINKING_BUDGET_OPTIONS)),
@@ -51,6 +54,7 @@ export const OpenCodeModelOptions = Schema.Struct({
 export type OpenCodeModelOptions = typeof OpenCodeModelOptions.Type;
 
 export const ProviderModelOptions = Schema.Struct({
+  ccb: Schema.optional(CcbModelOptions),
   codex: Schema.optional(CodexModelOptions),
   claudeAgent: Schema.optional(ClaudeModelOptions),
   gemini: Schema.optional(GeminiModelOptions),
@@ -126,6 +130,60 @@ type ModelDefinition = {
  * should return its own model list over the WS API.
  */
 export const MODEL_OPTIONS_BY_PROVIDER = {
+  ccb: [
+    {
+      slug: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      capabilities: {
+        reasoningEffortLevels: [
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High", isDefault: true },
+          { value: "max", label: "Max" },
+          { value: "ultrathink", label: "Ultrathink" },
+        ],
+        supportsFastMode: false,
+        supportsThinkingToggle: false,
+        promptInjectedEffortLevels: ["ultrathink"],
+        contextWindowOptions: [
+          { value: "200k", label: "200k", isDefault: true },
+          { value: "1m", label: "1M" },
+        ],
+      },
+    },
+    {
+      slug: "claude-opus-4-7",
+      name: "Claude Opus 4.7",
+      capabilities: {
+        reasoningEffortLevels: [
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High", isDefault: true },
+          { value: "xhigh", label: "Extra High" },
+          { value: "max", label: "Max" },
+          { value: "ultrathink", label: "Ultrathink" },
+        ],
+        supportsFastMode: true,
+        supportsThinkingToggle: false,
+        promptInjectedEffortLevels: ["ultrathink"],
+        contextWindowOptions: [
+          { value: "200k", label: "200k", isDefault: true },
+          { value: "1m", label: "1M" },
+        ],
+      },
+    },
+    {
+      slug: "claude-haiku-4-5",
+      name: "Claude Haiku 4.5",
+      capabilities: {
+        reasoningEffortLevels: [],
+        supportsFastMode: false,
+        supportsThinkingToggle: true,
+        promptInjectedEffortLevels: [],
+        contextWindowOptions: [],
+      },
+    },
+  ],
   codex: [
     {
       slug: "gpt-5.5",
@@ -353,6 +411,7 @@ type BuiltInModelSlug = (typeof MODEL_OPTIONS_BY_PROVIDER)[ProviderKind][number]
 export type ModelSlug = BuiltInModelSlug | (string & {});
 
 export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderKind, ModelSlug> = {
+  ccb: "claude-sonnet-4-6",
   codex: "gpt-5.5",
   claudeAgent: "claude-sonnet-4-6",
   gemini: "auto-gemini-3",
@@ -365,6 +424,17 @@ export const DEFAULT_MODEL = DEFAULT_MODEL_BY_PROVIDER.codex;
 export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini" as const;
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string, ModelSlug>> = {
+  ccb: {
+    sonnet: "claude-sonnet-4-6",
+    "sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    opus: "claude-opus-4-7",
+    "opus-4.7": "claude-opus-4-7",
+    "claude-opus-4.7": "claude-opus-4-7",
+    haiku: "claude-haiku-4-5",
+    "haiku-4.5": "claude-haiku-4-5",
+    "claude-haiku-4.5": "claude-haiku-4-5",
+  },
   codex: {
     "5.5": "gpt-5.5",
     "5.4": "gpt-5.4",
@@ -433,6 +503,7 @@ export const MODEL_CAPABILITIES_INDEX = Object.fromEntries(
 // ── Provider display names ────────────────────────────────────────────
 
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
+  ccb: "CCB",
   codex: "Codex",
   claudeAgent: "Claude",
   gemini: "Gemini",

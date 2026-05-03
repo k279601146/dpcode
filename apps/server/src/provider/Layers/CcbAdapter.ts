@@ -1,0 +1,1006 @@
+/**
+ * CcbAdapterLive - In-process Claude Code Best provider adapter.
+ *
+ * Keeps the CCB integration behind a narrow bridge so DPcode can follow both
+ * upstream projects with most compatibility work isolated here.
+ *
+ * @module CcbAdapterLive
+ */
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  EventId,
+  type ProviderApprovalDecision,
+  type ProviderComposerCapabilities,
+  type ProviderListAgentsResult,
+  type ProviderListCommandsResult,
+  type ProviderListModelsResult,
+  type ProviderRuntimeEvent,
+  type ProviderSendTurnInput,
+  type ProviderSession,
+  ProviderItemId,
+  RuntimeItemId,
+  RuntimeRequestId,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
+import {
+  DateTime,
+  Effect,
+  Fiber,
+  Layer,
+  Queue,
+  Random,
+  Stream,
+} from "effect";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterSessionNotFoundError,
+  ProviderAdapterValidationError,
+  type ProviderAdapterError,
+} from "../Errors.ts";
+import { CcbAdapter, type CcbAdapterShape } from "../Services/CcbAdapter.ts";
+import { withProviderPlanModePrompt } from "../planMode.ts";
+
+const PROVIDER = "ccb" as const;
+const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const DEFAULT_CCB_VENDOR_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../../CCB-claude-best-t3code",
+);
+
+type CcbBridgeModule = {
+  createDpcodeCcbSession(input: {
+    cwd: string;
+    model?: string;
+    fallbackModel?: string;
+    permissionMode?: string;
+    openAiBaseUrl?: string;
+    openAiApiKey?: string;
+    canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
+  }): Promise<CcbSessionHandle>;
+  listDpcodeCcbCommands?(cwd: string): Promise<ReadonlyArray<{ name: string; description?: string }>>;
+};
+
+type CcbSessionHandle = {
+  sessionId: string;
+  submitMessage(
+    prompt: string,
+    options?: { uuid?: string; isMeta?: boolean },
+  ): AsyncGenerator<Record<string, unknown>, void, unknown>;
+  interrupt(): void;
+  resetAbortController(): void;
+  getAbortSignal(): AbortSignal;
+  getMessages(): readonly unknown[];
+  setModel(model: string): void;
+};
+
+type PendingApproval = {
+  readonly detail: string;
+  readonly input: Record<string, unknown>;
+  readonly resolve: (decision: ProviderApprovalDecision) => void;
+  readonly promise: Promise<ProviderApprovalDecision>;
+};
+
+type CcbSessionContext = {
+  session: ProviderSession;
+  readonly handle: CcbSessionHandle;
+  readonly pendingApprovals: Map<string, PendingApproval>;
+  readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  activeTurnId: TurnId | undefined;
+  streamFiber: Fiber.Fiber<void, ProviderAdapterError> | undefined;
+  stopped: boolean;
+};
+
+export interface CcbAdapterLiveOptions {
+  readonly vendorPath?: string;
+  readonly bridgeModule?: CcbBridgeModule;
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
+function toMessage(cause: unknown, fallback: string): string {
+  return cause instanceof Error && cause.message.trim() ? cause.message : fallback;
+}
+
+function rawMethod(message: Record<string, unknown>): string {
+  const type = asString(message.type) ?? "message";
+  const subtype = asString(message.subtype);
+  const event = asObject(message.event);
+  const eventType = asString(event?.type);
+  return [type, subtype ?? eventType].filter(Boolean).join(".");
+}
+
+function contentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  const blocks = asArray(value);
+  if (!blocks) return "";
+  return blocks
+    .map((block) => {
+      const obj = asObject(block);
+      return asString(obj?.text) ?? "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function modelFromInput(input: ProviderSendTurnInput): string | undefined {
+  return input.modelSelection?.provider === PROVIDER ? input.modelSelection.model : undefined;
+}
+
+function buildPromptText(input: ProviderSendTurnInput): string {
+  return withProviderPlanModePrompt({
+    text: input.input?.trim() ?? "",
+    interactionMode: input.interactionMode,
+  });
+}
+
+function normalizeCcbOpenAiBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/+$/, "");
+}
+
+function ccbOpenAiModelUrl(baseUrl: string): string {
+  return `${normalizeCcbOpenAiBaseUrl(baseUrl)}/models`;
+}
+
+async function fetchCcbModels(input: {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+}): Promise<ProviderListModelsResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CCB_MODEL_DISCOVERY_TIMEOUT_MS);
+  try {
+    const response = await fetch(ccbOpenAiModelUrl(input.baseUrl), {
+      headers: input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : undefined,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`CCB model discovery failed: HTTP ${response.status}`);
+    }
+    const payload = (await response.json()) as { data?: Array<{ id?: unknown }> };
+    const models = (payload.data ?? [])
+      .map((model) => (typeof model.id === "string" ? model.id.trim() : ""))
+      .filter(Boolean)
+      .map((slug) => ({ slug, name: ccbModelName(slug) }));
+
+    return {
+      models,
+      source: input.baseUrl,
+      cached: false,
+    } satisfies ProviderListModelsResult;
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === "AbortError") {
+      throw new Error(
+        `CCB model discovery timed out after ${CCB_MODEL_DISCOVERY_TIMEOUT_MS}ms: ${ccbOpenAiModelUrl(
+          input.baseUrl,
+        )}`,
+      );
+    }
+    throw cause;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function ccbModelName(slug: string): string {
+  return slug
+    .split(/[/:]/)
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase()) ?? slug;
+}
+
+function approvalDecisionToCcb(
+  decision: ProviderApprovalDecision,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  switch (decision) {
+    case "accept":
+    case "acceptForSession":
+      return {
+        behavior: "allow",
+        updatedInput: input,
+        decisionReason: { type: "mode", mode: "default" },
+      };
+    case "cancel":
+    case "decline":
+      return {
+        behavior: "deny",
+        message: "Declined by user",
+        decisionReason: { type: "mode", mode: "default" },
+      };
+  }
+}
+
+function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
+  return Effect.gen(function* () {
+    const sessions = new Map<ThreadId, CcbSessionContext>();
+    const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+    const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.makeUnsafe(id));
+
+    let bridgeModulePromise: Promise<CcbBridgeModule> | undefined;
+    const loadBridgeModule = () =>
+      Effect.tryPromise({
+        try: async () => {
+          if (options?.bridgeModule) return options.bridgeModule;
+          bridgeModulePromise ??= import(
+            pathToFileURL(resolve(options?.vendorPath ?? DEFAULT_CCB_VENDOR_PATH, "src/dpcode/bridge.ts")).href
+          ) as Promise<CcbBridgeModule>;
+          return bridgeModulePromise;
+        },
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "ccb/bridge/load",
+            detail: toMessage(cause, "Failed to load CCB bridge"),
+            cause,
+          }),
+      });
+
+    const makeStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
+    const offer = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+      Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+
+    const requireSession = (threadId: ThreadId) =>
+      Effect.sync(() => sessions.get(threadId)).pipe(
+        Effect.flatMap((context) =>
+          context && !context.stopped
+            ? Effect.succeed(context)
+            : Effect.fail(
+                new ProviderAdapterSessionNotFoundError({
+                  provider: PROVIDER,
+                  threadId,
+                }),
+              ),
+        ),
+      );
+
+    const emitSessionState = (
+      context: CcbSessionContext,
+      state: "starting" | "ready" | "running" | "stopped" | "error",
+      reason?: string,
+    ) =>
+      Effect.gen(function* () {
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "session.state.changed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          createdAt: stamp.createdAt,
+          payload: {
+            state,
+            ...(reason ? { reason } : {}),
+          },
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+          },
+        });
+      });
+
+    const emitRuntimeError = (context: CcbSessionContext, message: string, detail?: unknown) =>
+      Effect.gen(function* () {
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "runtime.error",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+          createdAt: stamp.createdAt,
+          payload: {
+            message,
+            class: "provider_error",
+            ...(detail !== undefined ? { detail } : {}),
+          },
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+          },
+        });
+      });
+
+    const mapSdkMessage = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      message: Record<string, unknown>,
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const messageType = asString(message.type);
+        const method = rawMethod(message);
+        const raw = {
+          source: "ccb.sdk.message" as const,
+          method,
+          messageType,
+          payload: message,
+        };
+
+        if (messageType === "stream_event") {
+          const event = asObject(message.event);
+          const eventType = asString(event?.type);
+          if (eventType === "content_block_delta") {
+            const delta = asObject(event?.delta);
+            const text = asString(delta?.text) ?? asString(delta?.partial_json) ?? "";
+            if (text.length > 0) {
+              const stamp = yield* makeStamp();
+              yield* offer({
+                type: "content.delta",
+                eventId: stamp.eventId,
+                provider: PROVIDER,
+                threadId: context.session.threadId,
+                turnId,
+                createdAt: stamp.createdAt,
+                payload: {
+                  streamKind: asString(delta?.type)?.includes("thinking")
+                    ? "reasoning_text"
+                    : "assistant_text",
+                  delta: text,
+                },
+                raw,
+                providerRefs: { providerThreadId: context.handle.sessionId },
+              });
+            }
+          }
+          return;
+        }
+
+        if (messageType === "assistant") {
+          const content = asArray(asObject(message.message)?.content) ?? [];
+          for (const block of content) {
+            const blockObj = asObject(block);
+            const blockType = asString(blockObj?.type);
+            if (blockType === "text") {
+              const text = asString(blockObj?.text) ?? "";
+              if (text.length > 0) {
+                const stamp = yield* makeStamp();
+                yield* offer({
+                  type: "content.delta",
+                  eventId: stamp.eventId,
+                  provider: PROVIDER,
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: stamp.createdAt,
+                  payload: { streamKind: "assistant_text", delta: text },
+                  raw,
+                  providerRefs: { providerThreadId: context.handle.sessionId },
+                });
+              }
+            } else if (blockType === "thinking") {
+              const text = asString(blockObj?.thinking) ?? asString(blockObj?.text) ?? "";
+              if (text.length > 0) {
+                const stamp = yield* makeStamp();
+                yield* offer({
+                  type: "content.delta",
+                  eventId: stamp.eventId,
+                  provider: PROVIDER,
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: stamp.createdAt,
+                  payload: { streamKind: "reasoning_text", delta: text },
+                  raw,
+                  providerRefs: { providerThreadId: context.handle.sessionId },
+                });
+              }
+            } else if (blockType === "tool_use") {
+              const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
+              const toolName = asString(blockObj?.name) ?? "Tool";
+              const stamp = yield* makeStamp();
+              context.turns.at(-1)?.items.push(block);
+              yield* offer({
+                type: "item.started",
+                eventId: stamp.eventId,
+                provider: PROVIDER,
+                threadId: context.session.threadId,
+                turnId,
+                itemId,
+                createdAt: stamp.createdAt,
+                payload: {
+                  itemType:
+                    toolName === "Bash"
+                      ? "command_execution"
+                      : toolName === "Read"
+                        ? "file_change"
+                        : toolName.toLowerCase().includes("mcp")
+                          ? "mcp_tool_call"
+                          : "dynamic_tool_call",
+                  status: "inProgress",
+                  title: toolName,
+                  data: blockObj,
+                },
+                raw,
+                providerRefs: {
+                  providerThreadId: context.handle.sessionId,
+                  providerItemId: ProviderItemId.makeUnsafe(itemId),
+                },
+              });
+            }
+          }
+          return;
+        }
+
+        if (messageType === "user") {
+          const content = asObject(message.message)?.content;
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "item.completed",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: {
+              itemType: "user_message",
+              status: "completed",
+              data: message,
+              ...(contentText(content) ? { detail: contentText(content) } : {}),
+            },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
+        }
+
+        if (messageType === "system" && asString(message.subtype) === "compact_boundary") {
+          const itemId = RuntimeItemId.makeUnsafe(asString(message.uuid) ?? crypto.randomUUID());
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "item.completed",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            itemId,
+            createdAt: stamp.createdAt,
+            payload: {
+              itemType: "context_compaction",
+              status: "completed",
+              title: "Context compacted",
+              data: message,
+            },
+            raw,
+            providerRefs: {
+              providerThreadId: context.handle.sessionId,
+              providerItemId: ProviderItemId.makeUnsafe(itemId),
+            },
+          });
+          return;
+        }
+
+        if (messageType === "result") {
+          const stamp = yield* makeStamp();
+          const isError = message.is_error === true;
+          yield* offer({
+            type: "turn.completed",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: {
+              state: isError ? "failed" : "completed",
+              stopReason: asString(message.subtype),
+              usage: message.usage,
+              ...(typeof message.total_cost_usd === "number"
+                ? { totalCostUsd: message.total_cost_usd }
+                : {}),
+              ...(isError ? { errorMessage: asString(message.result) ?? "CCB turn failed" } : {}),
+            },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          if (isError) {
+            yield* emitRuntimeError(context, asString(message.result) ?? "CCB turn failed", message);
+          }
+        }
+      });
+
+    const startSession: CcbAdapterShape["startSession"] = (input) =>
+      Effect.gen(function* () {
+        if (input.provider !== undefined && input.provider !== PROVIDER) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
+          });
+        }
+
+        const bridge = yield* loadBridgeModule();
+        const createdAt = yield* nowIso;
+        const threadId = input.threadId;
+        const pendingApprovals = new Map<string, PendingApproval>();
+        const runtimeMode = input.runtimeMode;
+
+        const handle = yield* Effect.tryPromise({
+          try: () =>
+            bridge.createDpcodeCcbSession({
+              cwd: input.cwd ?? process.cwd(),
+              ...(input.modelSelection?.provider === PROVIDER ? { model: input.modelSelection.model } : {}),
+              ...(input.providerOptions?.ccb?.fallbackModel
+                ? { fallbackModel: input.providerOptions.ccb.fallbackModel }
+                : {}),
+              ...(input.providerOptions?.ccb?.permissionMode
+                ? { permissionMode: input.providerOptions.ccb.permissionMode }
+                : {}),
+              ...(input.providerOptions?.ccb?.openAiBaseUrl
+                ? { openAiBaseUrl: input.providerOptions.ccb.openAiBaseUrl }
+                : {}),
+              ...(input.providerOptions?.ccb?.openAiApiKey
+                ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
+                : {}),
+              canUseTool: async (tool, toolInput) => {
+                const inputObject = asObject(toolInput) ?? {};
+                if (runtimeMode === "full-access") {
+                  return approvalDecisionToCcb("accept", inputObject);
+                }
+
+                const requestId = crypto.randomUUID();
+                let resolveDecision!: (decision: ProviderApprovalDecision) => void;
+                const decisionPromise = new Promise<ProviderApprovalDecision>((resolve) => {
+                  resolveDecision = resolve;
+                });
+                pendingApprovals.set(requestId, {
+                  detail: asString(asObject(tool)?.name) ?? "CCB tool request",
+                  input: inputObject,
+                  resolve: resolveDecision,
+                  promise: decisionPromise,
+                });
+
+                const stamp = {
+                  eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                  createdAt: new Date().toISOString(),
+                };
+                await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                  type: "request.opened",
+                  eventId: stamp.eventId,
+                  provider: PROVIDER,
+                  threadId,
+                  requestId: RuntimeRequestId.makeUnsafe(requestId),
+                  createdAt: stamp.createdAt,
+                  payload: {
+                    requestType: "dynamic_tool_call",
+                    detail: asString(asObject(tool)?.name) ?? "CCB tool request",
+                    args: inputObject,
+                  },
+                  raw: {
+                    source: "ccb.sdk.permission",
+                    method: "canUseTool",
+                    payload: { tool, input: toolInput },
+                  },
+                } satisfies ProviderRuntimeEvent));
+
+                const resolved = await decisionPromise;
+                return approvalDecisionToCcb(resolved, inputObject);
+              },
+            }),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: toMessage(cause, "Failed to create CCB session"),
+              cause,
+            }),
+        });
+
+        const session: ProviderSession = {
+          provider: PROVIDER,
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+          ...(input.modelSelection?.provider === PROVIDER ? { model: input.modelSelection.model } : {}),
+          threadId,
+          resumeCursor: {
+            ccbSessionId: handle.sessionId,
+            turnCount: 0,
+          },
+          createdAt,
+          updatedAt: createdAt,
+        };
+
+        const context: CcbSessionContext = {
+          session,
+          handle,
+          pendingApprovals,
+          turns: [],
+          activeTurnId: undefined,
+          streamFiber: undefined,
+          stopped: false,
+        };
+        sessions.set(threadId, context);
+
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "session.started",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId,
+          createdAt: stamp.createdAt,
+          payload: {
+            message: "CCB session started",
+            resume: session.resumeCursor,
+          },
+          providerRefs: {
+            providerThreadId: handle.sessionId,
+          },
+        });
+        yield* emitSessionState(context, "ready");
+        return session;
+      });
+
+    const sendTurn: CcbAdapterShape["sendTurn"] = (input) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(input.threadId);
+        if (modelFromInput(input)) {
+          context.handle.setModel(modelFromInput(input)!);
+        }
+        context.handle.resetAbortController();
+
+        const turnId = TurnId.makeUnsafe(yield* Random.nextUUIDv4);
+        const startedAt = yield* nowIso;
+        context.activeTurnId = turnId;
+        context.turns.push({ id: turnId, items: [] });
+        context.session = {
+          ...context.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: startedAt,
+        };
+
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "turn.started",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: input.threadId,
+          turnId,
+          createdAt: stamp.createdAt,
+          payload: {
+            model: modelFromInput(input) ?? context.session.model ?? DEFAULT_MODEL_BY_PROVIDER.ccb,
+          },
+          providerRefs: { providerThreadId: context.handle.sessionId },
+        });
+        yield* emitSessionState(context, "running");
+
+        const prompt = buildPromptText(input);
+        const runStream = Effect.tryPromise({
+          try: async () => {
+            try {
+              for await (const message of context.handle.submitMessage(prompt, { uuid: turnId })) {
+                await Effect.runPromise(mapSdkMessage(context, turnId, message));
+              }
+              context.activeTurnId = undefined;
+              context.session = {
+                ...context.session,
+                status: "ready",
+                activeTurnId: undefined,
+                resumeCursor: {
+                  ccbSessionId: context.handle.sessionId,
+                  turnCount: context.turns.length,
+                },
+                updatedAt: new Date().toISOString(),
+              };
+              await Effect.runPromise(emitSessionState(context, "ready"));
+            } catch (cause) {
+              await Effect.runPromise(emitRuntimeError(context, toMessage(cause, "CCB turn failed"), cause));
+              const errorStamp = {
+                eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                createdAt: new Date().toISOString(),
+              };
+              await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
+                eventId: errorStamp.eventId,
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                createdAt: errorStamp.createdAt,
+                payload:
+                  context.handle.getAbortSignal().aborted
+                    ? { reason: "interrupted" }
+                    : { state: "failed", errorMessage: toMessage(cause, "CCB turn failed") },
+                providerRefs: { providerThreadId: context.handle.sessionId },
+              } satisfies ProviderRuntimeEvent));
+              context.activeTurnId = undefined;
+              context.session = {
+                ...context.session,
+                status: "error",
+                activeTurnId: undefined,
+                lastError: toMessage(cause, "CCB turn failed"),
+                updatedAt: new Date().toISOString(),
+              };
+            }
+          },
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: toMessage(cause, "CCB turn failed"),
+              cause,
+            }),
+        });
+        context.streamFiber = yield* runStream.pipe(Effect.forkDetach);
+
+        return {
+          threadId: input.threadId,
+          turnId,
+          resumeCursor: context.session.resumeCursor,
+        };
+      });
+
+    const interruptTurn: CcbAdapterShape["interruptTurn"] = (threadId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        context.handle.interrupt();
+        const stamp = yield* makeStamp();
+        if (context.activeTurnId) {
+          yield* offer({
+            type: "turn.aborted",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId,
+            turnId: context.activeTurnId,
+            createdAt: stamp.createdAt,
+            payload: { reason: "interrupted" },
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+        }
+      });
+
+    const respondToRequest: CcbAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        const pending = context.pendingApprovals.get(requestId);
+        if (!pending) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "item/requestApproval/decision",
+            detail: `Unknown pending approval request: ${requestId}`,
+          });
+        }
+        context.pendingApprovals.delete(requestId);
+        pending.resolve(decision);
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "request.resolved",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId,
+          requestId: RuntimeRequestId.makeUnsafe(requestId),
+          createdAt: stamp.createdAt,
+          payload: {
+            requestType: "dynamic_tool_call",
+            decision,
+            resolution: { detail: pending.detail },
+          },
+          raw: {
+            source: "ccb.sdk.permission",
+            method: "canUseTool.response",
+            payload: { decision },
+          },
+          providerRefs: { providerThreadId: context.handle.sessionId },
+        });
+      });
+
+    const respondToUserInput: CcbAdapterShape["respondToUserInput"] = (threadId, requestId) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "item/tool/respondToUserInput",
+          detail: `CCB adapter has no pending structured user input request: ${requestId} on ${threadId}`,
+        }),
+      );
+
+    const stopSession: CcbAdapterShape["stopSession"] = (threadId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        context.stopped = true;
+        context.handle.interrupt();
+        if (context.streamFiber) {
+          yield* Fiber.interrupt(context.streamFiber).pipe(Effect.asVoid);
+        }
+        sessions.delete(threadId);
+        yield* emitSessionState(context, "stopped");
+      });
+
+    const readThread: CcbAdapterShape["readThread"] = (threadId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        return {
+          threadId,
+          cwd: context.session.cwd ?? null,
+          turns: context.turns.length
+            ? context.turns.map((turn) => ({ id: turn.id, items: [...turn.items] }))
+            : [
+                {
+                  id: TurnId.makeUnsafe("ccb-transcript"),
+                  items: [...context.handle.getMessages()],
+                },
+              ],
+        };
+      });
+
+    const rollbackThread: CcbAdapterShape["rollbackThread"] = (threadId, numTurns) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        context.turns.splice(Math.max(0, context.turns.length - numTurns));
+        context.session = {
+          ...context.session,
+          resumeCursor: {
+            ccbSessionId: context.handle.sessionId,
+            turnCount: context.turns.length,
+          },
+          updatedAt: yield* nowIso,
+        };
+        return yield* readThread(threadId);
+      });
+
+    const compactThread: NonNullable<CcbAdapterShape["compactThread"]> = (threadId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        const itemId = RuntimeItemId.makeUnsafe(yield* Random.nextUUIDv4);
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "item.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId,
+          ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+          itemId,
+          createdAt: stamp.createdAt,
+          payload: {
+            itemType: "context_compaction",
+            status: "completed",
+            title: "Context compact requested",
+            detail: "CCB will compact through its native loop when the next boundary is emitted.",
+          },
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            providerItemId: ProviderItemId.makeUnsafe(itemId),
+          },
+        });
+      });
+
+    const listModels: NonNullable<CcbAdapterShape["listModels"]> = (input) =>
+      Effect.tryPromise({
+        try: async () => {
+          const baseUrl =
+            normalizeCcbOpenAiBaseUrl(input.ccbOpenAiBaseUrl) ??
+            normalizeCcbOpenAiBaseUrl(process.env.OPENAI_BASE_URL);
+          const apiKey = input.ccbOpenAiApiKey?.trim() || process.env.OPENAI_API_KEY || "";
+          if (!baseUrl) {
+            return {
+              models: [
+                { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+                { slug: "claude-opus-4-7", name: "Claude Opus 4.7" },
+                { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+              ],
+              source: PROVIDER,
+              cached: false,
+            } satisfies ProviderListModelsResult;
+          }
+
+          return fetchCcbModels({ baseUrl, apiKey });
+        },
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "models/list",
+            detail: toMessage(cause, "Failed to list CCB models"),
+            cause,
+          }),
+      });
+
+    const listCommands: NonNullable<CcbAdapterShape["listCommands"]> = (input) =>
+      Effect.gen(function* () {
+        const bridge = yield* loadBridgeModule();
+        if (!bridge.listDpcodeCcbCommands) {
+          return { commands: [], source: PROVIDER, cached: false } satisfies ProviderListCommandsResult;
+        }
+        const commands = yield* Effect.tryPromise({
+          try: () => bridge.listDpcodeCcbCommands!(input.cwd),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "commands/list",
+              detail: toMessage(cause, "Failed to list CCB commands"),
+              cause,
+            }),
+        });
+        return {
+          commands: commands.map((command) => ({
+            name: command.name,
+            ...(command.description ? { description: command.description } : {}),
+          })),
+          source: PROVIDER,
+          cached: false,
+        } satisfies ProviderListCommandsResult;
+      });
+
+    const listAgents: NonNullable<CcbAdapterShape["listAgents"]> = () =>
+      Effect.succeed({ agents: [], source: PROVIDER, cached: false } satisfies ProviderListAgentsResult);
+
+    const composerCapabilities: ProviderComposerCapabilities = {
+      provider: PROVIDER,
+      supportsSkillMentions: true,
+      supportsSkillDiscovery: true,
+      supportsNativeSlashCommandDiscovery: true,
+      supportsPluginMentions: true,
+      supportsPluginDiscovery: false,
+      supportsRuntimeModelList: true,
+      supportsThreadCompaction: true,
+      supportsThreadImport: true,
+    };
+
+    return {
+      provider: PROVIDER,
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        supportsSkillMentions: true,
+        supportsSkillDiscovery: true,
+        supportsNativeSlashCommandDiscovery: true,
+        supportsPluginMentions: true,
+        supportsPluginDiscovery: false,
+        supportsRuntimeModelList: true,
+      },
+      startSession,
+      sendTurn,
+      interruptTurn,
+      respondToRequest,
+      respondToUserInput,
+      stopSession,
+      listSessions: () => Effect.sync(() => Array.from(sessions.values()).map((entry) => entry.session)),
+      hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
+      readThread,
+      rollbackThread,
+      compactThread,
+      stopAll: () =>
+        Effect.gen(function* () {
+          for (const threadId of Array.from(sessions.keys())) {
+            yield* stopSession(threadId).pipe(Effect.catchAll(() => Effect.void));
+          }
+        }).pipe(Effect.zipRight(Queue.shutdown(runtimeEventQueue))),
+      streamEvents: Stream.fromQueue(runtimeEventQueue),
+      getComposerCapabilities: () => Effect.succeed(composerCapabilities),
+      listCommands,
+      listSkills: () => Effect.succeed({ skills: [], source: PROVIDER, cached: false }),
+      listPlugins: () =>
+        Effect.succeed({
+          marketplaces: [],
+          marketplaceLoadErrors: [],
+          remoteSyncError: null,
+          featuredPluginIds: [],
+          source: PROVIDER,
+          cached: false,
+        }),
+      readPlugin: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "plugin/read",
+            detail: "CCB plugin detail discovery is not available yet.",
+          }),
+        ),
+      listModels,
+      listAgents,
+    } satisfies CcbAdapterShape;
+  });
+}
+
+export const CcbAdapterLive = Layer.effect(CcbAdapter, makeCcbAdapter());
+
+export function makeCcbAdapterLive(options?: CcbAdapterLiveOptions) {
+  return Layer.effect(CcbAdapter, makeCcbAdapter(options));
+}
