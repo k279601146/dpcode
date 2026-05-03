@@ -3,7 +3,9 @@ import { queryOptions } from "@tanstack/react-query";
 
 import { openUsageProviderIdForProvider } from "./openUsageRateLimits";
 
-const OPEN_USAGE_BASE_URL = "http://127.0.0.1:6736";
+const OPEN_USAGE_BASE_URL = (import.meta.env.VITE_OPEN_USAGE_BASE_URL as string | undefined)
+  ?.trim()
+  .replace(/\/+$/, "");
 
 export const openUsageQueryKeys = {
   all: ["openUsage"] as const,
@@ -16,13 +18,13 @@ export function openUsageProviderSnapshotQueryOptions(provider: ProviderKind | n
 
   return queryOptions({
     queryKey: openUsageQueryKeys.provider(provider),
-    enabled: providerId !== null,
+    enabled: providerId !== null && Boolean(OPEN_USAGE_BASE_URL),
     staleTime: 15_000,
     refetchInterval: 15_000,
     refetchOnWindowFocus: false,
     retry: false,
     queryFn: async (): Promise<unknown | null> => {
-      if (!providerId) return null;
+      if (!providerId || !OPEN_USAGE_BASE_URL) return null;
 
       try {
         const response = await fetch(`${OPEN_USAGE_BASE_URL}/v1/usage/${providerId}`);

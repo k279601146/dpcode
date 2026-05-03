@@ -8,6 +8,19 @@ import {
   TextGeneration,
 } from "../Services/TextGeneration.ts";
 
+const TITLE_MAX_LENGTH = 60;
+
+function compactWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function localTitleFromMessage(message: string): string {
+  const compacted = compactWhitespace(message);
+  if (!compacted) return "New thread";
+  if (compacted.length <= TITLE_MAX_LENGTH) return compacted;
+  return `${compacted.slice(0, TITLE_MAX_LENGTH - 1).trimEnd()}...`;
+}
+
 function shouldUseOpenCode(input: {
   readonly model?: string;
   readonly modelSelection?: { provider: string };
@@ -31,12 +44,37 @@ const makeProviderTextGeneration = Effect.gen(function* () {
   }): TextGenerationShape =>
     shouldUseOpenCode(input) ? openCodeTextGeneration : codexTextGeneration;
 
+  const ccbTextGeneration: TextGenerationShape = {
+    generateCommitMessage: (input) => codexTextGeneration.generateCommitMessage(input),
+    generatePrContent: (input) => codexTextGeneration.generatePrContent(input),
+    generateDiffSummary: (input) => codexTextGeneration.generateDiffSummary(input),
+    generateBranchName: (input) =>
+      Effect.succeed({
+        branch: localTitleFromMessage(input.message)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 48) || "ccb-thread",
+      }),
+    generateThreadTitle: (input) =>
+      Effect.succeed({
+        title: localTitleFromMessage(input.message),
+      }),
+  };
+
+  const resolveProviderImplementation = (input: {
+    readonly model?: string;
+    readonly modelSelection?: { provider: string };
+  }): TextGenerationShape =>
+    input.modelSelection?.provider === "ccb" ? ccbTextGeneration : resolveImplementation(input);
+
   return {
-    generateCommitMessage: (input) => resolveImplementation(input).generateCommitMessage(input),
-    generatePrContent: (input) => resolveImplementation(input).generatePrContent(input),
-    generateDiffSummary: (input) => resolveImplementation(input).generateDiffSummary(input),
-    generateBranchName: (input) => resolveImplementation(input).generateBranchName(input),
-    generateThreadTitle: (input) => resolveImplementation(input).generateThreadTitle(input),
+    generateCommitMessage: (input) =>
+      resolveProviderImplementation(input).generateCommitMessage(input),
+    generatePrContent: (input) => resolveProviderImplementation(input).generatePrContent(input),
+    generateDiffSummary: (input) => resolveProviderImplementation(input).generateDiffSummary(input),
+    generateBranchName: (input) => resolveProviderImplementation(input).generateBranchName(input),
+    generateThreadTitle: (input) => resolveProviderImplementation(input).generateThreadTitle(input),
   } satisfies TextGenerationShape;
 });
 

@@ -9,6 +9,7 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   EventId,
+  type CanonicalItemType,
   type ProviderApprovalDecision,
   type ProviderComposerCapabilities,
   type ProviderListAgentsResult,
@@ -41,12 +42,27 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolveCcbVendorPath } from "../ccbVendorPath.ts";
 import { CcbAdapter, type CcbAdapterShape } from "../Services/CcbAdapter.ts";
 import { withProviderPlanModePrompt } from "../planMode.ts";
+import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const CCB_BRIDGE_CACHE_VERSION = "v2";
+const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
+  "MACRO.VERSION": JSON.stringify("2.1.888"),
+  "MACRO.BUILD_TIME": JSON.stringify(new Date().toISOString()),
+  "MACRO.FEEDBACK_CHANNEL": JSON.stringify(""),
+  "MACRO.ISSUES_EXPLAINER": JSON.stringify(""),
+  "MACRO.NATIVE_PACKAGE_URL": JSON.stringify(""),
+  "MACRO.PACKAGE_URL": JSON.stringify(""),
+  "MACRO.VERSION_CHANGELOG": JSON.stringify(""),
+};
 const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
   baseDir: dirname(fileURLToPath(import.meta.url)),
 });
@@ -88,6 +104,10 @@ type CcbSessionContext = {
   session: ProviderSession;
   readonly handle: CcbSessionHandle;
   readonly pendingApprovals: Map<string, PendingApproval>;
+  readonly pendingToolItems: Map<
+    string,
+    { readonly itemType: CanonicalItemType; readonly title: string }
+  >;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   activeTurnId: TurnId | undefined;
   streamFiber: Fiber.Fiber<void, ProviderAdapterError> | undefined;
@@ -97,6 +117,14 @@ type CcbSessionContext = {
 export interface CcbAdapterLiveOptions {
   readonly vendorPath?: string;
   readonly bridgeModule?: CcbBridgeModule;
+  readonly bridgeBundlePath?: string;
+  readonly runBridgeBuild?: (input: CcbBridgeBuildInput) => Promise<void>;
+}
+
+export interface CcbBridgeBuildInput {
+  readonly vendorPath: string;
+  readonly entryPath: string;
+  readonly outputPath: string;
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -136,6 +164,30 @@ function contentText(value: unknown): string {
     .join("\n");
 }
 
+function ccbToolItemType(toolName: string): CanonicalItemType {
+  const normalized = toolName.toLowerCase();
+  if (normalized === "bash") return "command_execution";
+  if (
+    normalized === "read" ||
+    normalized === "write" ||
+    normalized === "edit" ||
+    normalized === "multiedit" ||
+    normalized === "notebookedit"
+  ) {
+    return "file_change";
+  }
+  if (normalized === "task") return "collab_agent_tool_call";
+  if (normalized.includes("mcp")) return "mcp_tool_call";
+  if (normalized === "webfetch" || normalized === "websearch") return "web_search";
+  return "dynamic_tool_call";
+}
+
+function toolResultText(block: Record<string, unknown>): string {
+  const content = block.content;
+  if (typeof content === "string") return content;
+  return contentText(content);
+}
+
 function modelFromInput(input: ProviderSendTurnInput): string | undefined {
   return input.modelSelection?.provider === PROVIDER ? input.modelSelection.model : undefined;
 }
@@ -155,6 +207,120 @@ function normalizeCcbOpenAiBaseUrl(value: string | undefined): string | undefine
 
 function ccbOpenAiModelUrl(baseUrl: string): string {
   return `${normalizeCcbOpenAiBaseUrl(baseUrl)}/models`;
+}
+
+function ccbBridgeEntryPath(vendorPath: string): string {
+  return resolve(vendorPath, "src/dpcode/bridge.ts");
+}
+
+function defaultCcbBridgeBundlePath(vendorPath: string): string {
+  const cacheKey = createHash("sha1")
+    .update(resolve(vendorPath))
+    .update(CCB_BRIDGE_CACHE_VERSION)
+    .digest("hex");
+  return resolve(tmpdir(), "dpcode-ccb-bridge", cacheKey, "bridge.mjs");
+}
+
+function ccbBridgeFreshnessInputs(vendorPath: string): ReadonlyArray<string> {
+  return [
+    ccbBridgeEntryPath(vendorPath),
+    resolve(vendorPath, "src/QueryEngine.ts"),
+    resolve(vendorPath, "package.json"),
+    resolve(vendorPath, "bun.lock"),
+  ];
+}
+
+async function isCcbBridgeBundleFresh(
+  bundlePath: string,
+  watchedPaths: ReadonlyArray<string>,
+): Promise<boolean> {
+  try {
+    const bundleStat = await stat(bundlePath);
+    for (const watchedPath of watchedPaths) {
+      const watchedStat = await stat(watchedPath);
+      if (watchedStat.mtimeMs > bundleStat.mtimeMs) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runDefaultCcbBridgeBuild(input: CcbBridgeBuildInput): Promise<void> {
+  const args = [
+    "build",
+    input.entryPath,
+    "--target=node",
+    "--format=esm",
+    ...Object.entries(CCB_BRIDGE_MACRO_DEFINES).flatMap(([key, value]) => [
+      "--define",
+      `${key}=${value}`,
+    ]),
+    `--outfile=${input.outputPath}`,
+  ];
+
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn("bun", args, {
+      cwd: input.vendorPath,
+      shell: process.platform === "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      const output = Buffer.concat([...stdout, ...stderr]).toString("utf8").trim();
+      reject(
+        new Error(
+          [
+            `Failed to bundle CCB bridge with bun build (exit ${code ?? "unknown"}).`,
+            output,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        ),
+      );
+    });
+  });
+}
+
+async function resolveCcbBridgeModuleUrl(
+  input: {
+    readonly vendorPath: string;
+    readonly bridgeBundlePath?: string;
+    readonly runBridgeBuild?: (buildInput: CcbBridgeBuildInput) => Promise<void>;
+  },
+): Promise<string> {
+  const entryPath = ccbBridgeEntryPath(input.vendorPath);
+  const outputPath = input.bridgeBundlePath ?? defaultCcbBridgeBundlePath(input.vendorPath);
+  const watchedPaths = ccbBridgeFreshnessInputs(input.vendorPath);
+
+  if (!existsSync(entryPath)) {
+    throw new Error(`CCB bridge entry not found: ${entryPath}`);
+  }
+
+  if (!(await isCcbBridgeBundleFresh(outputPath, watchedPaths))) {
+    await mkdir(dirname(outputPath), { recursive: true });
+    await (input.runBridgeBuild ?? runDefaultCcbBridgeBuild)({
+      vendorPath: input.vendorPath,
+      entryPath,
+      outputPath,
+    });
+  }
+
+  const outputStat = await stat(outputPath);
+  const outputUrl = pathToFileURL(outputPath);
+  outputUrl.searchParams.set("mtime", String(outputStat.mtimeMs));
+  return outputUrl.href;
 }
 
 async function fetchCcbModels(input: {
@@ -239,9 +405,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
       Effect.tryPromise({
         try: async () => {
           if (options?.bridgeModule) return options.bridgeModule;
-          bridgeModulePromise ??= import(
-            pathToFileURL(resolve(options?.vendorPath ?? DEFAULT_CCB_VENDOR_PATH, "src/dpcode/bridge.ts")).href
-          ) as Promise<CcbBridgeModule>;
+          const vendorPath = options?.vendorPath ?? DEFAULT_CCB_VENDOR_PATH;
+          bridgeModulePromise ??= resolveCcbBridgeModuleUrl({
+            vendorPath,
+            ...(options?.bridgeBundlePath ? { bridgeBundlePath: options.bridgeBundlePath } : {}),
+            ...(options?.runBridgeBuild ? { runBridgeBuild: options.runBridgeBuild } : {}),
+          }).then((moduleUrl) => import(moduleUrl) as Promise<CcbBridgeModule>);
           return bridgeModulePromise;
         },
         catch: (cause) =>
@@ -399,8 +568,10 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             } else if (blockType === "tool_use") {
               const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
               const toolName = asString(blockObj?.name) ?? "Tool";
+              const itemType = ccbToolItemType(toolName);
               const stamp = yield* makeStamp();
               context.turns.at(-1)?.items.push(block);
+              context.pendingToolItems.set(itemId, { itemType, title: toolName });
               yield* offer({
                 type: "item.started",
                 eventId: stamp.eventId,
@@ -410,14 +581,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 itemId,
                 createdAt: stamp.createdAt,
                 payload: {
-                  itemType:
-                    toolName === "Bash"
-                      ? "command_execution"
-                      : toolName === "Read"
-                        ? "file_change"
-                        : toolName.toLowerCase().includes("mcp")
-                          ? "mcp_tool_call"
-                          : "dynamic_tool_call",
+                  itemType,
                   status: "inProgress",
                   title: toolName,
                   data: blockObj,
@@ -435,6 +599,47 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         if (messageType === "user") {
           const content = asObject(message.message)?.content;
+          const blocks = asArray(content);
+          const toolResults = blocks
+            ?.map(asObject)
+            .filter((block): block is Record<string, unknown> => block?.type === "tool_result");
+          if (toolResults?.length) {
+            for (const block of toolResults) {
+              const providerToolUseId = asString(block.tool_use_id);
+              const stored = providerToolUseId
+                ? context.pendingToolItems.get(providerToolUseId)
+                : undefined;
+              if (providerToolUseId) {
+                context.pendingToolItems.delete(providerToolUseId);
+              }
+              const itemId = RuntimeItemId.makeUnsafe(providerToolUseId ?? crypto.randomUUID());
+              const stamp = yield* makeStamp();
+              context.turns.at(-1)?.items.push(block);
+              yield* offer({
+                type: "item.completed",
+                eventId: stamp.eventId,
+                provider: PROVIDER,
+                threadId: context.session.threadId,
+                turnId,
+                itemId,
+                createdAt: stamp.createdAt,
+                payload: {
+                  itemType: stored?.itemType ?? "dynamic_tool_call",
+                  status: block.is_error === true ? "failed" : "completed",
+                  title: stored?.title ?? "Tool",
+                  ...(toolResultText(block) ? { detail: toolResultText(block) } : {}),
+                  data: block,
+                },
+                raw,
+                providerRefs: {
+                  providerThreadId: context.handle.sessionId,
+                  providerItemId: ProviderItemId.makeUnsafe(providerToolUseId ?? itemId),
+                },
+              });
+            }
+            return;
+          }
+
           const stamp = yield* makeStamp();
           yield* offer({
             type: "item.completed",
@@ -615,6 +820,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           session,
           handle,
           pendingApprovals,
+          pendingToolItems: new Map(),
           turns: [],
           activeTurnId: undefined,
           streamFiber: undefined,

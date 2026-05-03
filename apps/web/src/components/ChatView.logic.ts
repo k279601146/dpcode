@@ -84,8 +84,8 @@ export function resolveLocalDraftFallbackModelSelection(input: {
 
   return (
     input.projectDefaultModelSelection ?? {
-      provider: "codex",
-      model: DEFAULT_MODEL_BY_PROVIDER.codex,
+      provider: input.defaultProvider,
+      model: DEFAULT_MODEL_BY_PROVIDER[input.defaultProvider],
     }
   );
 }

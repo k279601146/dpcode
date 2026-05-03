@@ -246,10 +246,10 @@ const make = Effect.gen(function* () {
       input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread?.modelSelection;
     const providerOptions = input.providerOptions ?? threadProviderOptions.get(input.threadId);
 
-    if (modelSelection?.provider === "opencode") {
-      return {
-        modelSelection,
-        ...(providerOptions ? { providerOptions } : {}),
+      if (modelSelection?.provider === "ccb" || modelSelection?.provider === "opencode") {
+        return {
+          modelSelection,
+          ...(providerOptions ? { providerOptions } : {}),
       } as const;
     }
 

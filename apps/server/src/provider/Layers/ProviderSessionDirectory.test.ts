@@ -236,4 +236,51 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
 
       fs.rmSync(tempDir, { recursive: true, force: true });
     }));
+
+  it("rehydrates persisted CCB bindings across layer restart", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-directory-ccb-"));
+      const dbPath = path.join(tempDir, "orchestration.sqlite");
+      const directoryLayer = makeDirectoryLayer(makeSqlitePersistenceLive(dbPath));
+
+      const threadId = ThreadId.makeUnsafe("thread-ccb-restart");
+      const resumeCursor = {
+        ccbSessionId: "ccb-session-restart",
+        turnCount: 2,
+      };
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory;
+        yield* directory.upsert({
+          provider: "ccb",
+          threadId,
+          resumeCursor,
+          runtimePayload: {
+            cwd: "/tmp/ccb-project",
+            modelSelection: {
+              provider: "ccb",
+              model: "claude-sonnet-4-6",
+            },
+          },
+        });
+      }).pipe(Effect.provide(directoryLayer));
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory;
+
+        const provider = yield* directory.getProvider(threadId);
+        assert.equal(provider, "ccb");
+
+        const resolvedBinding = yield* directory.getBinding(threadId);
+        assertSome(resolvedBinding, {
+          threadId,
+          provider: "ccb",
+        });
+        if (Option.isSome(resolvedBinding)) {
+          assert.deepEqual(resolvedBinding.value.resumeCursor, resumeCursor);
+        }
+      }).pipe(Effect.provide(directoryLayer));
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }));
 });

@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  DEFAULT_PROVIDER_KIND,
   ProviderCompactThreadInput,
   ProviderForkThreadInput,
   ModelSelection,
@@ -355,7 +356,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         const input = {
           ...parsed,
           threadId,
-          provider: parsed.provider ?? "codex",
+          provider: parsed.provider ?? DEFAULT_PROVIDER_KIND,
         };
         clearRuntimeIdleTimer(threadId);
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));

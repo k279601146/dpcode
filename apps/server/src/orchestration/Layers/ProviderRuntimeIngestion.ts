@@ -1948,7 +1948,7 @@ const make = Effect.gen(function* () {
       const flushEvent: ProviderRuntimeEvent = {
         type: "turn.started",
         eventId: event.eventId,
-        provider: thread?.session?.providerName === "claudeAgent" ? "claudeAgent" : "codex",
+        provider: thread?.session?.providerName ?? thread?.modelSelection.provider ?? "codex",
         createdAt: event.payload.createdAt,
         threadId: event.payload.threadId,
         turnId: activeTurnId,

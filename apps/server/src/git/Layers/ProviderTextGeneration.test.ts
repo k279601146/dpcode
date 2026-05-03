@@ -154,4 +154,27 @@ describe("ProviderTextGenerationLive", () => {
     );
     expect(codex.generateThreadTitle).not.toHaveBeenCalled();
   });
+
+  it("generates CCB thread titles locally without invoking Codex", async () => {
+    const { layer, codex, opencode } = makeProviderTextGenerationTestLayer();
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const textGeneration = yield* TextGeneration;
+        return yield* textGeneration.generateThreadTitle({
+          cwd: "/repo",
+          message:
+            "Implement the CCB provider send message flow and verify runtime events are delivered",
+          modelSelection: {
+            provider: "ccb",
+            model: "claude-sonnet-4-6",
+          },
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result.title).toBe("Implement the CCB provider send message flow and verify run...");
+    expect(codex.generateThreadTitle).not.toHaveBeenCalled();
+    expect(opencode.generateThreadTitle).not.toHaveBeenCalled();
+  });
 });
