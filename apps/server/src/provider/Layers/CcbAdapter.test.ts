@@ -368,52 +368,6 @@ layer(
   );
 });
 
-const appendSystemPromptBridge = (() => {
-  const createSession = vi.fn(async () => ({
-    sessionId: "ccb-session-append-system-prompt",
-    async *submitMessage() {
-      yield { type: "result", subtype: "success", is_error: false };
-    },
-    interrupt: vi.fn(),
-    resetAbortController: vi.fn(),
-    getAbortSignal: () => new AbortController().signal,
-    getMessages: () => [],
-    setModel: vi.fn(),
-  }));
-  return {
-    createSession,
-    bridgeModule: {
-      createDpcodeCcbSession: createSession,
-    },
-  } satisfies CcbAdapterLiveOptions & {
-    createSession: ReturnType<typeof vi.fn>;
-  };
-})();
-
-layer(appendSystemPromptBridge)("CcbAdapterLive system prompt", (it) => {
-  it.effect("tells CCB to use tools before claiming project work is done", () =>
-    Effect.gen(function* () {
-      const adapter = yield* CcbAdapter;
-      const threadId = ThreadId.makeUnsafe("thread-ccb-append-system-prompt-test");
-
-      yield* adapter.startSession({
-        threadId,
-        provider: "ccb",
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-      });
-
-      const options = appendSystemPromptBridge.createSession.mock.calls[0]?.[0] as
-        | { appendSystemPrompt?: string }
-        | undefined;
-      assert.match(options?.appendSystemPrompt ?? "", /must use the available filesystem and shell tools/);
-      assert.match(options?.appendSystemPrompt ?? "", /Do not say a command is running/);
-      assert.match(options?.appendSystemPrompt ?? "", /PowerShell tool/);
-      assert.match(options?.appendSystemPrompt ?? "", /Use non-interactive commands/);
-    }),
-  );
-});
-
 const inputBridge = (() => {
   const submitInputs: Array<unknown> = [];
   return {
@@ -611,6 +565,95 @@ layer(permissionModeBridge)("CcbAdapterLive permission mode switching", (it) => 
       yield* Fiber.join(secondCompleted);
 
       assert.deepEqual(permissionModeBridge.modes, ["plan", "acceptEdits"]);
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "我先创建项目。" },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-command-1",
+            name: "PowerShell",
+            input: { command: "npx create-next-app nextjs-project --yes" },
+          },
+        ],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-command-1",
+            content: "created nextjs-project",
+          },
+        ],
+      },
+    },
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "text_delta", text: "项目已经创建完成。" },
+      },
+    },
+    { type: "result", subtype: "success", is_error: false },
+  ]),
+)("CcbAdapterLive app-style streaming", (it) => {
+  it.effect("splits assistant text around tools and asks checkpointing to refresh changed files", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-app-style-streaming-test");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            (event.type === "content.delta" &&
+              event.payload.streamKind === "assistant_text") ||
+            (event.type === "item.completed" &&
+              event.payload.itemType === "command_execution") ||
+            event.type === "turn.diff.updated" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "开发一个简单的Next.js项目",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const textEvents = events.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "content.delta" }> =>
+          event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+      );
+      assert.equal(textEvents.length, 2);
+      assert.notEqual(String(textEvents[0]?.itemId), String(textEvents[1]?.itemId));
+      assert.ok(events.some((event) => event.type === "turn.diff.updated"));
+      assert.ok(events.some((event) => event.type === "turn.completed"));
     }),
   );
 });
@@ -1414,12 +1457,6 @@ layer(multiTurnBridge)("CcbAdapterLive multi-turn", (it) => {
         typeof prompt === "string" ? prompt : JSON.stringify(prompt);
       assert.match(promptText(multiTurnBridge.submitPrompts[0]), /first message/);
       assert.match(promptText(multiTurnBridge.submitPrompts[1]), /second message/);
-      assert.equal(
-        multiTurnBridge.submitPrompts.every((prompt) =>
-          promptText(prompt).includes("do not paste full file contents"),
-        ),
-        true,
-      );
       assert.equal((yield* adapter.listSessions())[0]?.provider, "ccb");
     }),
   );

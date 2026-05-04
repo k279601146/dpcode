@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v4";
+const CCB_BRIDGE_CACHE_VERSION = "v6";
 const SUPPORTED_CCB_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -77,12 +77,6 @@ const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
   "MACRO.PACKAGE_URL": JSON.stringify(""),
   "MACRO.VERSION_CHANGELOG": JSON.stringify(""),
 };
-const DPCODE_CCB_APPEND_SYSTEM_PROMPT = [
-  "DPCode is a coding workspace UI. When the user asks you to create, edit, delete, inspect, install, run, or verify project files, you must use the available filesystem and shell tools to perform the work before saying it is done.",
-  "Do not say a command is running, completed, or scheduled unless you have actually called the appropriate tool and observed its result. If a required tool is unavailable, say that directly instead of pretending to have executed it.",
-  "On Windows, prefer the PowerShell tool for shell commands when it is available.",
-  "Use non-interactive commands in this headless coding environment. For project scaffolding commands such as create-next-app, pass flags that avoid prompts, and verify created files with filesystem tools before reporting success.",
-].join("\n");
 const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
   baseDir: dirname(fileURLToPath(import.meta.url)),
 });
@@ -181,6 +175,8 @@ type CcbSessionContext = {
   readonly streamToolItemsByIndex: Map<number, CcbStreamToolItem>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   readonly streamedAssistantTextByTurnId: Map<string, string>;
+  currentAssistantTextItemId: RuntimeItemId | undefined;
+  sawWorkspaceMutationTool: boolean;
   activeTurnId: TurnId | undefined;
   streamFiber: Fiber.Fiber<void, ProviderAdapterError> | undefined;
   stopped: boolean;
@@ -803,8 +799,6 @@ function buildPromptText(input: ProviderSendTurnInput): string {
     prompt,
     skillsPrompt,
     mentionsPrompt,
-    "",
-    "DPCode shows file changes in separate UI cards. When you create, edit, or delete files, do not paste full file contents in the chat response unless the user explicitly asks for the contents. Mention the changed paths and summarize the result instead.",
   ]
     .filter((part) => part.length > 0)
     .join("\n");
@@ -1258,6 +1252,15 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         if (delta.length === 0) {
           return;
         }
+        const resolvedItemId =
+          streamKind === "assistant_text"
+            ? (itemId ??
+              context.currentAssistantTextItemId ??
+              RuntimeItemId.makeUnsafe(`assistant-text-${crypto.randomUUID()}`))
+            : itemId;
+        if (streamKind === "assistant_text") {
+          context.currentAssistantTextItemId = resolvedItemId;
+        }
         const stamp = yield* makeStamp();
         yield* offer({
           type: "content.delta",
@@ -1265,7 +1268,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           provider: PROVIDER,
           threadId: context.session.threadId,
           turnId,
-          ...(itemId ? { itemId } : {}),
+          ...(resolvedItemId ? { itemId: resolvedItemId } : {}),
           createdAt: stamp.createdAt,
           payload: {
             streamKind,
@@ -1274,13 +1277,19 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           raw,
           providerRefs: {
             providerThreadId: context.handle.sessionId,
-            ...(itemId ? { providerItemId: ProviderItemId.makeUnsafe(String(itemId)) } : {}),
+            ...(resolvedItemId
+              ? { providerItemId: ProviderItemId.makeUnsafe(String(resolvedItemId)) }
+              : {}),
           },
         });
         if (streamKind === "assistant_text") {
           recordAssistantTextDelta(context, turnId, delta);
         }
       });
+
+    const startNextAssistantTextSegment = (context: CcbSessionContext) => {
+      context.currentAssistantTextItemId = undefined;
+    };
 
     const emitThreadTokenUsage = (
       context: CcbSessionContext,
@@ -1411,6 +1420,16 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
       result?: unknown,
     ) =>
       Effect.gen(function* () {
+        if (lifecycle === "item.started" || lifecycle === "item.completed") {
+          startNextAssistantTextSegment(context);
+        }
+        if (
+          lifecycle === "item.completed" &&
+          status === "completed" &&
+          (tool.itemType === "file_change" || tool.itemType === "command_execution")
+        ) {
+          context.sawWorkspaceMutationTool = true;
+        }
         const stamp = yield* makeStamp();
         yield* offer({
           type: lifecycle,
@@ -2235,6 +2254,20 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             );
             context.pendingToolItems.delete(pendingKey);
           }
+          if (!effectiveIsError && context.sawWorkspaceMutationTool) {
+            const diffStamp = yield* makeStamp();
+            yield* offer({
+              type: "turn.diff.updated",
+              eventId: diffStamp.eventId,
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              turnId,
+              createdAt: diffStamp.createdAt,
+              payload: { unifiedDiff: "" },
+              raw,
+              providerRefs: { providerThreadId: context.handle.sessionId },
+            });
+          }
           yield* offer({
             type: "turn.completed",
             eventId: stamp.eventId,
@@ -2255,6 +2288,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           });
           context.streamedAssistantTextByTurnId.delete(String(turnId));
           context.streamToolItemsByIndex.clear();
+          context.currentAssistantTextItemId = undefined;
+          context.sawWorkspaceMutationTool = false;
           if (effectiveIsError) {
             yield* emitRuntimeError(context, errorMessage ?? "CCB turn failed", message);
           }
@@ -2307,7 +2342,6 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
                 : {}),
               ...(initialMessages ? { initialMessages } : {}),
-              appendSystemPrompt: DPCODE_CCB_APPEND_SYSTEM_PROMPT,
               canUseTool: async (...args: ReadonlyArray<unknown>) => {
                 const [tool, toolInput, , , toolUseId] = args;
                 const inputObject = asObject(toolInput) ?? {};
@@ -2334,6 +2368,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                       ...(inputFingerprint ? { lastInputFingerprint: inputFingerprint } : {}),
                     };
                     context.pendingToolItems.set(pendingKey, toolItem);
+                    context.currentAssistantTextItemId = undefined;
                     const raw = {
                       source: "ccb.sdk.permission" as const,
                       method: "canUseTool",
@@ -2466,6 +2501,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           streamToolItemsByIndex: new Map(),
           turns: [],
           streamedAssistantTextByTurnId: new Map(),
+          currentAssistantTextItemId: undefined,
+          sawWorkspaceMutationTool: false,
           activeTurnId: undefined,
           streamFiber: undefined,
           stopped: false,
@@ -2532,6 +2569,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const turnId = TurnId.makeUnsafe(yield* Random.nextUUIDv4);
         const startedAt = yield* nowIso;
         context.activeTurnId = turnId;
+        context.currentAssistantTextItemId = undefined;
+        context.sawWorkspaceMutationTool = false;
         context.turns.push({ id: turnId, items: [] });
         context.session = {
           ...context.session,
@@ -2759,6 +2798,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const turnId = TurnId.makeUnsafe(yield* Random.nextUUIDv4);
         const stamp = yield* makeStamp();
         context.activeTurnId = turnId;
+        context.currentAssistantTextItemId = undefined;
+        context.sawWorkspaceMutationTool = false;
         context.turns.push({ id: turnId, items: [] });
         context.session = {
           ...context.session,
