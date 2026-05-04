@@ -218,6 +218,43 @@ function makeCcbEvent(threadId: ThreadId, turnId: TurnId, index: number): Provid
       payload: { unifiedDiff: "diff --git a/src/app.ts b/src/app.ts" },
     },
     {
+      type: "runtime.warning",
+      eventId: asEventId("ccb-msg-evt-runtime-warning"),
+      provider: "ccb",
+      threadId,
+      turnId,
+      createdAt,
+      payload: {
+        message: "CCB API request retry 1/3",
+        detail: { attempt: 1, maxRetries: 3 },
+      },
+    },
+    {
+      type: "account.rate-limits.updated",
+      eventId: asEventId("ccb-msg-evt-rate-limits"),
+      provider: "ccb",
+      threadId,
+      turnId,
+      createdAt,
+      payload: {
+        rateLimits: {
+          status: "allowed_warning",
+          utilization: 0.82,
+        },
+      },
+    },
+    {
+      type: "thread.metadata.updated",
+      eventId: asEventId("ccb-msg-evt-metadata"),
+      provider: "ccb",
+      threadId,
+      turnId,
+      createdAt,
+      payload: {
+        metadata: { promptSuggestion: "Run focused verification" },
+      },
+    },
+    {
       type: "item.completed",
       eventId: asEventId("ccb-msg-evt-compact"),
       provider: "ccb",
@@ -400,6 +437,9 @@ it.effect("ProviderServiceLive defaults to CCB and routes AI coding message even
       assert.equal(eventTypes.has("request.opened"), true);
       assert.equal(eventTypes.has("request.resolved"), true);
       assert.equal(eventTypes.has("turn.diff.updated"), true);
+      assert.equal(eventTypes.has("runtime.warning"), true);
+      assert.equal(eventTypes.has("account.rate-limits.updated"), true);
+      assert.equal(eventTypes.has("thread.metadata.updated"), true);
       assert.equal(eventTypes.has("turn.completed"), true);
       assert.equal(
         events.some(

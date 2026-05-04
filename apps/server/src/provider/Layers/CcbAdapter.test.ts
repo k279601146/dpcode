@@ -1,6 +1,6 @@
 import { assert, it, vi } from "@effect/vitest";
 import { Effect, Fiber, Stream } from "effect";
-import { ApprovalRequestId, ThreadId } from "@t3tools/contracts";
+import { ApprovalRequestId, ThreadId, type ProviderRuntimeEvent } from "@t3tools/contracts";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -361,6 +361,157 @@ layer(
     {
       type: "stream_event",
       event: {
+        type: "content_block_start",
+        index: 1,
+        content_block: {
+          type: "mcp_tool_use",
+          id: "tool-mcp-1",
+          name: "lookup",
+          input: { query: "issue status" },
+        },
+      },
+    },
+    {
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 2,
+        content_block: {
+          type: "server_tool_use",
+          id: "tool-web-1",
+          name: "web_search",
+          input: { query: "DPCode CCB events" },
+        },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-read-1",
+            name: "ReadFile",
+            input: { file_path: "src/app.ts" },
+          },
+          {
+            type: "tool_use",
+            id: "tool-grep-1",
+            name: "Grep",
+            input: { pattern: "ccb", path: "apps/server/src" },
+          },
+          {
+            type: "tool_use",
+            id: "tool-glob-1",
+            name: "Glob",
+            input: { pattern: "**/*.ts", path: "apps/server/src" },
+          },
+          {
+            type: "tool_use",
+            id: "tool-edit-1",
+            name: "Edit",
+            input: { file_path: "src/app.ts", old_string: "old", new_string: "new" },
+          },
+        ],
+      },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+    },
+  ]),
+)("CcbAdapterLive tool display classification", (it) => {
+  it.effect("classifies CCB mcp, web, read-only, and file-edit tool rows for existing UI types", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.started" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(13),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-tool-display-classification-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "exercise tool display classification",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const started = events.filter((event) => event.type === "item.started");
+      assert.ok(
+        started.some(
+          (event) =>
+            event.type === "item.started" &&
+            event.payload.itemType === "mcp_tool_call" &&
+            event.payload.title === "MCP tool call",
+        ),
+      );
+      assert.ok(
+        started.some(
+          (event) =>
+            event.type === "item.started" &&
+            event.payload.itemType === "web_search" &&
+            event.payload.title === "Web search",
+        ),
+      );
+      assert.ok(
+        started.some(
+          (event) =>
+            event.type === "item.started" &&
+            event.payload.itemType === "dynamic_tool_call" &&
+            event.payload.title === "Read file" &&
+            (event.payload.data as { filePath?: string }).filePath === "src/app.ts",
+        ),
+      );
+      assert.ok(
+        started.some(
+          (event) =>
+            event.type === "item.started" &&
+            event.payload.itemType === "dynamic_tool_call" &&
+            event.payload.title === "Search files" &&
+            (event.payload.data as { filePath?: string }).filePath === "apps/server/src",
+        ),
+      );
+      assert.ok(
+        started.some(
+          (event) =>
+            event.type === "item.started" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.title === "File change" &&
+            (event.payload.data as { files?: string[] }).files?.includes("src/app.ts"),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.status === "completed",
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "stream_event",
+      event: {
         type: "content_block_delta",
         delta: { type: "text_delta", text: "You are 27." },
       },
@@ -636,7 +787,11 @@ layer(
     },
     {
       type: "rate_limit_event",
-      remaining: 42,
+      rate_limit_info: {
+        status: "allowed_warning",
+        utilization: 0.82,
+        resetsAt: 1_800_000_000,
+      },
     },
     {
       type: "result",
@@ -720,12 +875,178 @@ layer(
       assert.ok(events.some((event) => event.type === "tool.progress"));
       assert.ok(events.some((event) => event.type === "tool.summary"));
       assert.ok(events.some((event) => event.type === "auth.status"));
-      assert.ok(events.some((event) => event.type === "account.rate-limits.updated"));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "account.rate-limits.updated" &&
+            (event.payload.rateLimits as { status?: string }).status === "allowed_warning",
+        ),
+      );
       assert.ok(
         events.some(
           (event) =>
             event.type === "thread.token-usage.updated" &&
             event.payload.usage.usedTokens === 42,
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "system",
+      subtype: "session_state_changed",
+      state: "requires_action",
+    },
+    {
+      type: "system",
+      subtype: "api_retry",
+      attempt: 2,
+      max_retries: 5,
+      retry_delay_ms: 250,
+      error: "rate_limit",
+    },
+    {
+      type: "system",
+      subtype: "local_command_output",
+      content: "local command output\n",
+    },
+    {
+      type: "system",
+      subtype: "post_turn_summary",
+      uuid: "post-turn-summary-1",
+      summarizes_uuid: "assistant-1",
+      status_category: "review_ready",
+      status_detail: "Ready for review",
+      title: "Review ready",
+      description: "Updated the adapter",
+      recent_action: "Mapped CCB events",
+      needs_action: "Review changes",
+      artifact_urls: ["https://example.test/artifact"],
+    },
+    {
+      type: "system",
+      subtype: "elicitation_complete",
+      mcp_server_name: "github",
+      elicitation_id: "elicitation-1",
+    },
+    {
+      type: "streamlined_text",
+      uuid: "streamlined-1",
+      text: "Streamlined answer.",
+    },
+    {
+      type: "streamlined_tool_use_summary",
+      tool_summary: "Read 2 files and edited 1 file",
+    },
+    {
+      type: "prompt_suggestion",
+      suggestion: "Run focused verification",
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+    },
+  ]),
+)("CcbAdapterLive additional SDK display messages", (it) => {
+  it.effect("maps CCB session state, retry, local output, summaries, elicitation, and streamlined messages", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "session.state.changed" ||
+            event.type === "runtime.warning" ||
+            event.type === "content.delta" ||
+            event.type === "item.updated" ||
+            event.type === "user-input.resolved" ||
+            event.type === "item.completed" ||
+            event.type === "tool.summary" ||
+            event.type === "thread.metadata.updated" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(12),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-additional-sdk-display-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "exercise additional sdk messages",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "session.state.changed" &&
+            event.payload.state === "waiting" &&
+            event.payload.reason === "session_state:requires_action",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message.includes("CCB API request retry"),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "assistant_text" &&
+            event.payload.delta.includes("local command output"),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.updated" &&
+            event.payload.itemType === "dynamic_tool_call" &&
+            event.payload.title === "Review ready" &&
+            (event.payload.data as { needsAction?: string }).needsAction === "Review changes",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "user-input.resolved" &&
+            (event.payload.answers as { elicitationId?: string }).elicitationId === "elicitation-1",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "assistant_message" &&
+            event.payload.detail === "Streamlined answer.",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "tool.summary" &&
+            event.payload.summary === "Read 2 files and edited 1 file",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "thread.metadata.updated" &&
+            (event.payload.metadata as { promptSuggestion?: string }).promptSuggestion ===
+              "Run focused verification",
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
@@ -840,23 +1161,34 @@ layer(approvalBridge)("CcbAdapterLive approvals", (it) => {
         runtimeMode: "approval-required",
       });
 
-      const eventFiber = yield* adapter.streamEvents.pipe(
+      const decisionFiber = yield* Effect.promise(() =>
+        approvalBridge.requestTool({ name: "Bash" }, { command: "pwd" }),
+      ).pipe(Effect.forkDetach);
+
+      const openedEventFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.type === "request.opened"),
         Stream.take(1),
         Stream.runCollect,
         Effect.forkDetach,
       );
 
-      const decisionFiber = yield* Effect.promise(() =>
-        approvalBridge.requestTool({ name: "Bash" }, { command: "pwd" }),
-      ).pipe(Effect.forkDetach);
-
-      const openedEvents = Array.from(yield* Fiber.join(eventFiber));
-      const opened = openedEvents[0];
+      const openedEvents = Array.from(yield* Fiber.join(openedEventFiber));
+      const opened = openedEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "request.opened" }> =>
+          event.type === "request.opened",
+      );
       assert.ok(opened);
       assert.equal(opened.type, "request.opened");
       assert.equal(opened.threadId, threadId);
       assert.equal(opened.payload.detail, "Bash");
+      assert.equal(opened.payload.requestType, "command_execution_approval");
+
+      const resolvedEventFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "request.resolved"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
 
       yield* adapter.respondToRequest(
         threadId,
@@ -865,6 +1197,13 @@ layer(approvalBridge)("CcbAdapterLive approvals", (it) => {
       );
 
       const result = yield* Fiber.join(decisionFiber);
+      const requestEvents = Array.from(yield* Fiber.join(resolvedEventFiber));
+      const resolved = requestEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "request.resolved" }> =>
+          event.type === "request.resolved",
+      );
+      assert.equal(resolved?.type, "request.resolved");
+      assert.equal(resolved?.payload.requestType, "command_execution_approval");
       assert.equal(result.behavior, "allow");
       assert.equal(session.resumeCursor.ccbSessionId, "ccb-session-approval");
     }),
@@ -1231,6 +1570,116 @@ layer(makePermissionOnlyToolEventFakeBridge())("CcbAdapterLive permission-only t
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-bash-error-1",
+            name: "Bash",
+            input: { command: "exit 1" },
+          },
+        ],
+      },
+    },
+    {
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      stop_reason: "tool_error",
+      total_cost_usd: 0.125,
+      usage: { input_tokens: 8, output_tokens: 2 },
+      modelUsage: {
+        "claude-sonnet-4-6": {
+          inputTokens: 8,
+          outputTokens: 2,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          webSearchRequests: 0,
+          costUSD: 0.125,
+          contextWindow: 200_000,
+          maxOutputTokens: 16_384,
+        },
+      },
+      errors: ["command failed", "exit code 1"],
+    },
+  ]),
+)("CcbAdapterLive result finalization", (it) => {
+  it.effect("propagates result stop reason, model usage, errors, cost, and pending tool failure", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.started" ||
+            event.type === "item.completed" ||
+            event.type === "thread.token-usage.updated" ||
+            event.type === "turn.completed" ||
+            event.type === "runtime.error",
+        ),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-result-finalization-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "exercise result finalization",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "command_execution" &&
+            event.payload.status === "failed" &&
+            (event.payload.data as { command?: string }).command === "exit 1",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "thread.token-usage.updated" &&
+            event.payload.usage.usedTokens === 10,
+        ),
+      );
+      const completed = events.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed",
+      );
+      assert.equal(completed?.type, "turn.completed");
+      assert.equal(completed?.payload.state, "failed");
+      assert.equal(completed?.payload.stopReason, "tool_error");
+      assert.equal(completed?.payload.totalCostUsd, 0.125);
+      assert.equal(completed?.payload.errorMessage, "command failed\nexit code 1");
+      assert.equal(
+        (completed?.payload.modelUsage as { "claude-sonnet-4-6"?: { costUSD?: number } })[
+          "claude-sonnet-4-6"
+        ]?.costUSD,
+        0.125,
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "runtime.error" &&
+            event.payload.message === "command failed\nexit code 1",
+        ),
+      );
     }),
   );
 });

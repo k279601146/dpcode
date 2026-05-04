@@ -124,6 +124,7 @@ type CcbSessionHandle = {
 type PendingApproval = {
   readonly detail: string;
   readonly input: Record<string, unknown>;
+  readonly requestType: CanonicalRequestType;
   readonly resolve: (decision: ProviderApprovalDecision) => void;
   readonly promise: Promise<ProviderApprovalDecision>;
 };
@@ -215,9 +216,14 @@ function contentText(value: unknown): string {
     .join("\n");
 }
 
-function ccbToolItemType(toolName: string): CanonicalItemType {
+function ccbToolItemType(toolName: string, blockType?: string): CanonicalItemType {
   const normalized = toolName.toLowerCase();
+  if (blockType === "mcp_tool_use") return "mcp_tool_call";
+  if (blockType === "server_tool_use" && normalized.includes("web")) return "web_search";
   if (normalized === "todowrite" || normalized.includes("todo")) return "plan";
+  if (normalized.includes("mcp")) return "mcp_tool_call";
+  if (normalized === "webfetch" || normalized === "websearch" || normalized.includes("web search"))
+    return "web_search";
   if (
     normalized === "bash" ||
     normalized.includes("command") ||
@@ -226,6 +232,7 @@ function ccbToolItemType(toolName: string): CanonicalItemType {
   ) {
     return "command_execution";
   }
+  if (isCcbReadOnlyToolName(toolName)) return "dynamic_tool_call";
   if (
     normalized === "write" ||
     normalized === "edit" ||
@@ -248,17 +255,20 @@ function ccbToolItemType(toolName: string): CanonicalItemType {
   ) {
     return "collab_agent_tool_call";
   }
-  if (normalized.includes("mcp")) return "mcp_tool_call";
-  if (normalized === "webfetch" || normalized === "websearch" || normalized.includes("web search"))
-    return "web_search";
   if (normalized.includes("image")) return "image_view";
   return "dynamic_tool_call";
 }
 
 function isCcbReadOnlyToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
+  if (normalized === "webfetch" || normalized === "websearch" || normalized.includes("web search")) {
+    return false;
+  }
   return (
     normalized === "read" ||
+    normalized === "readfile" ||
+    normalized === "ls" ||
+    normalized.includes("readfile") ||
     normalized.includes("read file") ||
     normalized.includes("view") ||
     normalized === "grep" ||
@@ -282,6 +292,22 @@ function classifyCcbRequestType(toolName: string): CanonicalRequestType {
 }
 
 function ccbToolTitle(itemType: CanonicalItemType, toolName: string): string {
+  const normalized = toolName.toLowerCase();
+  if (itemType === "dynamic_tool_call" && isCcbReadOnlyToolName(toolName)) {
+    if (
+      normalized === "read" ||
+      normalized === "readfile" ||
+      normalized.includes("readfile") ||
+      normalized.includes("read file") ||
+      normalized.includes("view")
+    ) {
+      return "Read file";
+    }
+    if (normalized === "ls") {
+      return "List files";
+    }
+    return "Search files";
+  }
   switch (itemType) {
     case "plan":
       return "Plan";
@@ -354,6 +380,15 @@ function filesFromToolInput(input: Record<string, unknown>): ReadonlyArray<strin
   return Array.from(new Set(candidates.filter((value): value is string => value !== undefined)));
 }
 
+function normalizeCcbToolResult(result: unknown): unknown {
+  const record = asObject(result);
+  if (!record) return result;
+  if (record.content !== undefined && Object.keys(record).length === 1) {
+    return record.content;
+  }
+  return result;
+}
+
 function commandFromToolInput(input: Record<string, unknown>): string | undefined {
   return firstToolString(input.command, input.cmd);
 }
@@ -409,7 +444,7 @@ function ccbToolData(
     ...(command ? { command } : {}),
     ...(filePath ? { filePath } : {}),
     ...(files.length > 0 ? { files } : {}),
-    ...(result !== undefined ? { result } : {}),
+    ...(result !== undefined ? { result: normalizeCcbToolResult(result) } : {}),
   };
 }
 
@@ -537,6 +572,32 @@ function normalizeCcbTokenUsage(value: unknown): ThreadTokenUsageSnapshot | unde
 
 function ccbTaskStatus(value: unknown): "completed" | "failed" | "stopped" {
   return value === "failed" || value === "stopped" ? value : "completed";
+}
+
+function ccbSessionState(value: unknown): "ready" | "running" | "waiting" {
+  if (value === "running") return "running";
+  if (value === "requires_action" || value === "compacting") return "waiting";
+  return "ready";
+}
+
+function ccbResultStopReason(message: Record<string, unknown>): string | null | undefined {
+  const stopReason = asString(message.stop_reason) ?? asString(message.stopReason);
+  if (stopReason) return stopReason;
+  return asString(message.subtype);
+}
+
+function ccbResultErrorMessage(message: Record<string, unknown>): string | undefined {
+  const errors = asArray(message.errors)?.filter(
+    (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+  );
+  if (errors && errors.length > 0) {
+    return errors.join("\n");
+  }
+  return asString(message.result) ?? "CCB turn failed";
+}
+
+function ccbRateLimitPayload(message: Record<string, unknown>): unknown {
+  return asObject(message.rate_limit_info) ?? asObject(message.rateLimitInfo) ?? message;
 }
 
 function recordAssistantTextDelta(
@@ -1143,7 +1204,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
             const toolName = asString(blockObj?.name) ?? "Tool";
             const input = asObject(blockObj?.input) ?? {};
-            const itemType = ccbToolItemType(toolName);
+            const itemType = ccbToolItemType(toolName, blockType);
             const detail = summarizeCcbToolRequest(toolName, input);
             const lastInputFingerprint =
               Object.keys(input).length > 0 ? toolInputFingerprint(input) : undefined;
@@ -1289,7 +1350,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             ) {
               const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
               const toolName = asString(blockObj?.name) ?? "Tool";
-              const itemType = ccbToolItemType(toolName);
+              const itemType = ccbToolItemType(toolName, blockType);
               const input =
                 asObject(blockObj?.input) ??
                 context.pendingToolItems.get(String(itemId))?.input ??
@@ -1469,6 +1530,73 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 },
               });
               return;
+            case "session_state_changed":
+              yield* offer({
+                ...base,
+                type: "session.state.changed",
+                payload: {
+                  state: ccbSessionState(message.state),
+                  reason: `session_state:${asString(message.state) ?? "unknown"}`,
+                  detail: message,
+                },
+              });
+              return;
+            case "api_retry":
+              yield* offer({
+                ...base,
+                type: "runtime.warning",
+                payload: {
+                  message: `CCB API request retry ${asNumber(message.attempt) ?? "?"}/${
+                    asNumber(message.max_retries) ?? "?"
+                  }`,
+                  detail: message,
+                },
+              });
+              return;
+            case "local_command_output": {
+              const output = asString(message.content) ?? "";
+              if (output.length > 0) {
+                yield* emitContentDelta(context, turnId, "assistant_text", output, raw);
+              }
+              return;
+            }
+            case "post_turn_summary": {
+              const itemId = RuntimeItemId.makeUnsafe(asString(message.uuid) ?? crypto.randomUUID());
+              const title = asString(message.title) ?? "Turn summary";
+              const detail = [
+                asString(message.status_detail),
+                asString(message.description),
+                asString(message.recent_action),
+                asString(message.needs_action),
+              ]
+                .filter((value): value is string => Boolean(value))
+                .join("\n");
+              yield* offer({
+                ...base,
+                type: "item.updated",
+                itemId,
+                payload: {
+                  itemType: "dynamic_tool_call",
+                  status: "inProgress",
+                  title,
+                  ...(detail ? { detail } : {}),
+                  data: {
+                    statusCategory: asString(message.status_category) ?? "unknown",
+                    title,
+                    ...(asString(message.description) ? { description: asString(message.description) } : {}),
+                    ...(asString(message.recent_action) ? { recentAction: asString(message.recent_action) } : {}),
+                    ...(asString(message.needs_action) ? { needsAction: asString(message.needs_action) } : {}),
+                    ...(asArray(message.artifact_urls) ? { artifactUrls: message.artifact_urls } : {}),
+                    ...(asString(message.summarizes_uuid) ? { summarizesUuid: asString(message.summarizes_uuid) } : {}),
+                  },
+                },
+                providerRefs: {
+                  providerThreadId: context.handle.sessionId,
+                  providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+                },
+              });
+              return;
+            }
             case "compact_boundary": {
               const itemId = RuntimeItemId.makeUnsafe(asString(message.uuid) ?? crypto.randomUUID());
               yield* offer({
@@ -1606,6 +1734,23 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 },
               });
               return;
+            case "elicitation_complete":
+              yield* offer({
+                ...base,
+                type: "user-input.resolved",
+                payload: {
+                  answers: {
+                    completed: true,
+                    ...(asString(message.mcp_server_name)
+                      ? { mcpServerName: asString(message.mcp_server_name) }
+                      : {}),
+                    ...(asString(message.elicitation_id)
+                      ? { elicitationId: asString(message.elicitation_id) }
+                      : {}),
+                  },
+                },
+              });
+              return;
             default:
               yield* offer({
                 ...base,
@@ -1617,6 +1762,66 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               });
               return;
           }
+        }
+
+        if (messageType === "streamlined_text") {
+          const text = asString(message.text) ?? "";
+          const providerItemId = asString(message.uuid);
+          const finalDelta = assistantFinalTextDelta(context, turnId, text);
+          if (finalDelta.length > 0) {
+            yield* emitContentDelta(
+              context,
+              turnId,
+              "assistant_text",
+              finalDelta,
+              raw,
+              providerItemId ? RuntimeItemId.makeUnsafe(providerItemId) : undefined,
+            );
+          }
+          yield* emitAssistantMessageCompleted(context, turnId, text, raw, providerItemId);
+          return;
+        }
+
+        if (messageType === "streamlined_tool_use_summary") {
+          const summary = asString(message.tool_summary);
+          if (!summary) {
+            return;
+          }
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "tool.summary",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: { summary },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
+        }
+
+        if (messageType === "prompt_suggestion") {
+          const suggestion = asString(message.suggestion);
+          if (!suggestion) {
+            return;
+          }
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "thread.metadata.updated",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: {
+              metadata: { promptSuggestion: suggestion },
+            },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
         }
 
         if (messageType === "tool_progress") {
@@ -1700,7 +1905,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             threadId: context.session.threadId,
             turnId,
             createdAt: stamp.createdAt,
-            payload: { rateLimits: message },
+            payload: { rateLimits: ccbRateLimitPayload(message) },
             raw,
             providerRefs: { providerThreadId: context.handle.sessionId },
           });
@@ -1724,6 +1929,9 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           );
           const stamp = yield* makeStamp();
           const isError = message.is_error === true;
+          const modelUsage = asObject(message.modelUsage) ?? asObject(message.model_usage);
+          const totalCostUsd = asNumber(message.total_cost_usd) ?? asNumber(message.totalCostUsd);
+          const errorMessage = isError ? ccbResultErrorMessage(message) : undefined;
           if (message.usage) {
             yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
           }
@@ -1751,12 +1959,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             createdAt: stamp.createdAt,
             payload: {
               state: isError ? "failed" : "completed",
-              stopReason: asString(message.subtype),
+              stopReason: ccbResultStopReason(message),
               usage: message.usage,
-              ...(typeof message.total_cost_usd === "number"
-                ? { totalCostUsd: message.total_cost_usd }
-                : {}),
-              ...(isError ? { errorMessage: asString(message.result) ?? "CCB turn failed" } : {}),
+              ...(modelUsage ? { modelUsage } : {}),
+              ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+              ...(errorMessage ? { errorMessage } : {}),
             },
             raw,
             providerRefs: { providerThreadId: context.handle.sessionId },
@@ -1764,7 +1971,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           context.streamedAssistantTextByTurnId.delete(String(turnId));
           context.streamToolItemsByIndex.clear();
           if (isError) {
-            yield* emitRuntimeError(context, asString(message.result) ?? "CCB turn failed", message);
+            yield* emitRuntimeError(context, errorMessage ?? "CCB turn failed", message);
           }
         }
       });
@@ -1903,6 +2110,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 pendingApprovals.set(requestId, {
                   detail: asString(asObject(tool)?.name) ?? "CCB tool request",
                   input: inputObject,
+                  requestType,
                   resolve: resolveDecision,
                   promise: decisionPromise,
                 });
@@ -2177,7 +2385,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           requestId: RuntimeRequestId.makeUnsafe(requestId),
           createdAt: stamp.createdAt,
           payload: {
-            requestType: "dynamic_tool_call",
+            requestType: pending.requestType,
             decision,
             resolution: { detail: pending.detail },
           },
