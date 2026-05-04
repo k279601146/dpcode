@@ -10,6 +10,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   EventId,
   type CanonicalItemType,
+  type CanonicalRequestType,
   type ProviderApprovalDecision,
   type ProviderComposerCapabilities,
   type ProviderListAgentsResult,
@@ -128,6 +129,7 @@ type PendingApproval = {
 };
 
 type PendingToolItem = {
+  readonly itemId: RuntimeItemId;
   readonly itemType: CanonicalItemType;
   readonly title: string;
   readonly toolName: string;
@@ -225,7 +227,6 @@ function ccbToolItemType(toolName: string): CanonicalItemType {
     return "command_execution";
   }
   if (
-    normalized === "read" ||
     normalized === "write" ||
     normalized === "edit" ||
     normalized === "multiedit" ||
@@ -251,6 +252,32 @@ function ccbToolItemType(toolName: string): CanonicalItemType {
   if (normalized === "webfetch" || normalized === "websearch" || normalized.includes("web search"))
     return "web_search";
   if (normalized.includes("image")) return "image_view";
+  return "dynamic_tool_call";
+}
+
+function isCcbReadOnlyToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return (
+    normalized === "read" ||
+    normalized.includes("read file") ||
+    normalized.includes("view") ||
+    normalized === "grep" ||
+    normalized === "glob" ||
+    normalized.includes("search")
+  );
+}
+
+function classifyCcbRequestType(toolName: string): CanonicalRequestType {
+  if (isCcbReadOnlyToolName(toolName)) {
+    return "file_read_approval";
+  }
+  const itemType = ccbToolItemType(toolName);
+  if (itemType === "command_execution") {
+    return "command_execution_approval";
+  }
+  if (itemType === "file_change") {
+    return "file_change_approval";
+  }
   return "dynamic_tool_call";
 }
 
@@ -1700,6 +1727,21 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           if (message.usage) {
             yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
           }
+          for (const [pendingKey, tool] of context.pendingToolItems) {
+            yield* emitToolLifecycle(
+              context,
+              turnId,
+              "item.completed",
+              tool,
+              {
+                ...raw,
+                method: `${method}.pending-tool-complete`,
+              },
+              isError ? "failed" : "completed",
+              message,
+            );
+            context.pendingToolItems.delete(pendingKey);
+          }
           yield* offer({
             type: "turn.completed",
             eventId: stamp.eventId,
@@ -1778,6 +1820,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 const inputObject = asObject(toolInput) ?? {};
                 const context = contextRef;
                 const toolName = asString(asObject(tool)?.name) ?? "Tool";
+                const requestType = classifyCcbRequestType(toolName);
                 if (context?.activeTurnId) {
                   const itemId = RuntimeItemId.makeUnsafe(asString(toolUseId) ?? crypto.randomUUID());
                   const pendingKey = String(itemId);
@@ -1798,15 +1841,20 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                       ...(inputFingerprint ? { lastInputFingerprint: inputFingerprint } : {}),
                     };
                     context.pendingToolItems.set(pendingKey, toolItem);
-                    await Effect.runPromise(
-                      Queue.offer(runtimeEventQueue, {
+                    const raw = {
+                      source: "ccb.sdk.permission" as const,
+                      method: "canUseTool",
+                      payload: { tool, input: toolInput, toolUseId },
+                    };
+                    const startedAt = new Date().toISOString();
+                    await Effect.runPromise(Queue.offer(runtimeEventQueue, {
                         type: "item.started",
                         eventId: EventId.makeUnsafe(crypto.randomUUID()),
                         provider: PROVIDER,
                         threadId,
                         turnId: context.activeTurnId,
                         itemId,
-                        createdAt: new Date().toISOString(),
+                        createdAt: startedAt,
                         payload: {
                           itemType,
                           status: "inProgress",
@@ -1814,17 +1862,33 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                           ...(detail ? { detail } : {}),
                           data: ccbToolData(toolName, inputObject),
                         },
-                        raw: {
-                          source: "ccb.sdk.permission",
-                          method: "canUseTool",
-                          payload: { tool, input: toolInput, toolUseId },
-                        },
+                        raw,
                         providerRefs: {
                           providerThreadId: context.handle.sessionId,
                           providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
                         },
-                      } satisfies ProviderRuntimeEvent),
-                    );
+                    } satisfies ProviderRuntimeEvent));
+                    await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                      type: "item.updated",
+                      eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                      provider: PROVIDER,
+                      threadId,
+                      turnId: context.activeTurnId,
+                      itemId,
+                      createdAt: startedAt,
+                      payload: {
+                        itemType,
+                        status: "inProgress",
+                        title: toolItem.title,
+                        ...(detail ? { detail } : {}),
+                        data: ccbToolData(toolName, inputObject),
+                      },
+                      raw,
+                      providerRefs: {
+                        providerThreadId: context.handle.sessionId,
+                        providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+                      },
+                    } satisfies ProviderRuntimeEvent));
                   }
                 }
                 if (runtimeMode === "full-access") {
@@ -1855,7 +1919,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   requestId: RuntimeRequestId.makeUnsafe(requestId),
                   createdAt: stamp.createdAt,
                   payload: {
-                    requestType: "dynamic_tool_call",
+                    requestType,
                     detail: toolName,
                     args: inputObject,
                   },

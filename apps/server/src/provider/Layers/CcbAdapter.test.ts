@@ -139,6 +139,35 @@ function makePermissionToolEventFakeBridge(): CcbAdapterLiveOptions {
   };
 }
 
+function makePermissionOnlyToolEventFakeBridge(): CcbAdapterLiveOptions {
+  return {
+    bridgeModule: {
+      createDpcodeCcbSession: vi.fn(
+        async (input: {
+          canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
+        }) => ({
+          sessionId: "ccb-session-permission-only-tool-event",
+          async *submitMessage() {
+            await input.canUseTool(
+              { name: "Edit" },
+              { file_path: "index.html", old_string: "Hello", new_string: "Hello DPCode" },
+              {},
+              {},
+              "tool-edit-permission-only-1",
+            );
+            yield { type: "result", subtype: "success", is_error: false };
+          },
+          interrupt: vi.fn(),
+          resetAbortController: vi.fn(),
+          getAbortSignal: () => new AbortController().signal,
+          getMessages: () => [],
+          setModel: vi.fn(),
+        }),
+      ),
+    },
+  };
+}
+
 function makeCompactFakeBridge(): CcbAdapterLiveOptions & {
   submitPrompts: string[];
 } {
@@ -1093,11 +1122,12 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
         Stream.filter(
           (event) =>
             event.type === "item.started" ||
+            event.type === "item.updated" ||
             event.type === "content.delta" ||
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(4),
+        Stream.take(6),
         Stream.runCollect,
         Effect.forkDetach,
       );
@@ -1127,6 +1157,14 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
       assert.ok(
         events.some(
           (event) =>
+            event.type === "item.updated" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.status === "inProgress",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
             event.type === "content.delta" &&
             event.payload.streamKind === "file_change_output" &&
             event.payload.delta === "created index.html",
@@ -1138,6 +1176,58 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
             event.type === "item.completed" &&
             event.payload.itemType === "file_change" &&
             event.payload.status === "completed",
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+layer(makePermissionOnlyToolEventFakeBridge())("CcbAdapterLive permission-only tool events", (it) => {
+  it.effect("keeps tool/file rows visible when CCB omits the tool_result message", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.updated" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-permission-only-tool-event-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "edit a file without emitting tool_result",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.updated" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.status === "inProgress" &&
+            event.payload.data.files.includes("index.html"),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.status === "completed" &&
+            event.payload.data.files.includes("index.html"),
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
