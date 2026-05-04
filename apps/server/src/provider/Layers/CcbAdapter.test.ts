@@ -98,6 +98,47 @@ function makeApprovalFakeBridge(): CcbAdapterLiveOptions & {
   };
 }
 
+function makePermissionToolEventFakeBridge(): CcbAdapterLiveOptions {
+  return {
+    bridgeModule: {
+      createDpcodeCcbSession: vi.fn(
+        async (input: {
+          canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
+        }) => ({
+          sessionId: "ccb-session-permission-tool-event",
+          async *submitMessage() {
+            await input.canUseTool(
+              { name: "Write" },
+              { file_path: "index.html" },
+              {},
+              {},
+              "tool-write-permission-1",
+            );
+            yield {
+              type: "user",
+              message: {
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: "tool-write-permission-1",
+                    content: "created index.html",
+                  },
+                ],
+              },
+            };
+            yield { type: "result", subtype: "success", is_error: false };
+          },
+          interrupt: vi.fn(),
+          resetAbortController: vi.fn(),
+          getAbortSignal: () => new AbortController().signal,
+          getMessages: () => [],
+          setModel: vi.fn(),
+        }),
+      ),
+    },
+  };
+}
+
 function makeCompactFakeBridge(): CcbAdapterLiveOptions & {
   submitPrompts: string[];
 } {
@@ -424,7 +465,7 @@ layer(
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(6),
+        Stream.take(8),
         Stream.runCollect,
         Effect.forkDetach,
       );
@@ -481,6 +522,181 @@ layer(
             event.type === "content.delta" &&
             event.payload.streamKind === "file_change_output" &&
             event.payload.delta.includes("file_path"),
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-todo-1",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "Inspect CCB events", status: "completed" },
+                {
+                  content: "Normalize message rendering",
+                  activeForm: "Normalizing message rendering",
+                  status: "in_progress",
+                },
+              ],
+            },
+          },
+          {
+            type: "tool_use",
+            id: "tool-plan-1",
+            name: "ExitPlanMode",
+            input: { plan: "1. Inspect events\n2. Patch adapter\n3. Verify" },
+          },
+        ],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 2,
+        },
+      },
+    },
+    { type: "system", subtype: "init", model: "claude-sonnet-4-6" },
+    {
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-ccb-1",
+      description: "Run subtask",
+      task_type: "agent",
+    },
+    {
+      type: "system",
+      subtype: "task_progress",
+      task_id: "task-ccb-1",
+      description: "Subtask is working",
+      summary: "Inspecting",
+      usage: { input_tokens: 20, output_tokens: 10 },
+      last_tool_name: "Read",
+    },
+    {
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-ccb-1",
+      status: "completed",
+      summary: "Subtask done",
+      usage: { input_tokens: 25, output_tokens: 15 },
+    },
+    {
+      type: "tool_progress",
+      tool_use_id: "tool-bash-1",
+      tool_name: "Bash",
+      elapsed_time_seconds: 1.5,
+    },
+    {
+      type: "tool_use_summary",
+      summary: "Read files and updated adapter",
+      preceding_tool_use_ids: ["tool-todo-1"],
+    },
+    {
+      type: "auth_status",
+      isAuthenticating: false,
+      output: ["ready"],
+    },
+    {
+      type: "rate_limit_event",
+      remaining: 42,
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      usage: { input_tokens: 30, output_tokens: 12 },
+    },
+  ]),
+)("CcbAdapterLive canonical message rendering", (it) => {
+  it.effect("normalizes CCB plan, task, telemetry, auth, rate limit, and usage messages", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.started" ||
+            event.type === "turn.tasks.updated" ||
+            event.type === "turn.proposed.completed" ||
+            event.type === "session.configured" ||
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed" ||
+            event.type === "tool.progress" ||
+            event.type === "tool.summary" ||
+            event.type === "auth.status" ||
+            event.type === "account.rate-limits.updated" ||
+            event.type === "thread.token-usage.updated" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(17),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-canonical-rendering-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "exercise ccb event rendering",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "turn.tasks.updated" &&
+            event.payload.tasks[1]?.task === "Normalizing message rendering" &&
+            event.payload.tasks[1]?.status === "inProgress",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "turn.proposed.completed" &&
+            event.payload.planMarkdown.includes("Patch adapter"),
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "session.configured"));
+      assert.ok(events.some((event) => event.type === "task.started"));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.description === "Subtask is working" &&
+            event.payload.lastToolName === "Read",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "task.completed" &&
+            event.payload.status === "completed" &&
+            event.payload.summary === "Subtask done",
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "tool.progress"));
+      assert.ok(events.some((event) => event.type === "tool.summary"));
+      assert.ok(events.some((event) => event.type === "auth.status"));
+      assert.ok(events.some((event) => event.type === "account.rate-limits.updated"));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "thread.token-usage.updated" &&
+            event.payload.usage.usedTokens === 42,
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
@@ -869,6 +1085,66 @@ layer({
   );
 });
 
+layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool events", (it) => {
+  it.effect("emits a tool lifecycle row from canUseTool when the SDK stream omits tool_use", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.started" ||
+            event.type === "content.delta" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-permission-tool-event-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "write a file",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const toolStarted = events.find((event) => event.type === "item.started");
+      assert.equal(toolStarted?.type, "item.started");
+      if (toolStarted?.type !== "item.started") {
+        throw new Error("Expected CCB permission preflight to emit item.started.");
+      }
+      assert.equal(toolStarted.payload.itemType, "file_change");
+      assert.equal(toolStarted.payload.title, "File change");
+      assert.deepEqual(toolStarted.payload.data.files, ["index.html"]);
+
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "file_change_output" &&
+            event.payload.delta === "created index.html",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "file_change" &&
+            event.payload.status === "completed",
+        ),
+      );
+      assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
 layer(makeFakeVendorBridge())("CcbAdapterLive bridge bundling", (it) => {
   it.effect("bundles the CCB source bridge before importing it under Node", () =>
     Effect.gen(function* () {
@@ -961,7 +1237,7 @@ layer(
           (event) =>
             event.type === "item.started" &&
             event.payload.itemType === "file_change" &&
-            event.payload.title === "Write",
+            event.payload.title === "File change",
         ),
       );
       assert.ok(

@@ -19,10 +19,12 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ThreadTokenUsageSnapshot,
   type RuntimeContentStreamKind,
   ProviderItemId,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -178,6 +180,14 @@ function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
   return Array.isArray(value) ? value : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function trimOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
 function toMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message.trim() ? cause.message : fallback;
 }
@@ -205,20 +215,66 @@ function contentText(value: unknown): string {
 
 function ccbToolItemType(toolName: string): CanonicalItemType {
   const normalized = toolName.toLowerCase();
-  if (normalized === "bash") return "command_execution";
+  if (normalized === "todowrite" || normalized.includes("todo")) return "plan";
+  if (
+    normalized === "bash" ||
+    normalized.includes("command") ||
+    normalized.includes("shell") ||
+    normalized.includes("terminal")
+  ) {
+    return "command_execution";
+  }
   if (
     normalized === "read" ||
     normalized === "write" ||
     normalized === "edit" ||
     normalized === "multiedit" ||
-    normalized === "notebookedit"
+    normalized === "notebookedit" ||
+    normalized.includes("file") ||
+    normalized.includes("patch") ||
+    normalized.includes("replace") ||
+    normalized.includes("create") ||
+    normalized.includes("delete")
   ) {
     return "file_change";
   }
-  if (normalized === "task") return "collab_agent_tool_call";
+  if (
+    normalized === "task" ||
+    normalized === "agent" ||
+    normalized.includes("agent") ||
+    normalized.includes("subagent") ||
+    normalized.includes("sub-agent")
+  ) {
+    return "collab_agent_tool_call";
+  }
   if (normalized.includes("mcp")) return "mcp_tool_call";
-  if (normalized === "webfetch" || normalized === "websearch") return "web_search";
+  if (normalized === "webfetch" || normalized === "websearch" || normalized.includes("web search"))
+    return "web_search";
+  if (normalized.includes("image")) return "image_view";
   return "dynamic_tool_call";
+}
+
+function ccbToolTitle(itemType: CanonicalItemType, toolName: string): string {
+  switch (itemType) {
+    case "plan":
+      return "Plan";
+    case "command_execution":
+      return "Command run";
+    case "file_change":
+      return "File change";
+    case "mcp_tool_call":
+      return "MCP tool call";
+    case "collab_agent_tool_call":
+      return "Subagent task";
+    case "web_search":
+      return "Web search";
+    case "image_view":
+      return "Image view";
+    case "dynamic_tool_call":
+      return "Tool call";
+    default:
+      return toolName;
+  }
 }
 
 function tryParseJsonRecord(value: string): Record<string, unknown> | undefined {
@@ -257,6 +313,18 @@ function filePathFromToolInput(input: Record<string, unknown>): string | undefin
     input.filename,
     input.notebook_path,
   );
+}
+
+function filesFromToolInput(input: Record<string, unknown>): ReadonlyArray<string> {
+  const candidates = [
+    filePathFromToolInput(input),
+    ...(["files", "file_paths", "paths"] as const).flatMap((key) =>
+      Array.isArray(input[key])
+        ? input[key].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [],
+    ),
+  ];
+  return Array.from(new Set(candidates.filter((value): value is string => value !== undefined)));
 }
 
 function commandFromToolInput(input: Record<string, unknown>): string | undefined {
@@ -307,19 +375,141 @@ function ccbToolData(
 ): Record<string, unknown> {
   const command = commandFromToolInput(input);
   const filePath = filePathFromToolInput(input);
+  const files = filesFromToolInput(input);
   return {
     toolName,
     input,
     ...(command ? { command } : {}),
-    ...(filePath ? { filePath, files: [filePath] } : {}),
+    ...(filePath ? { filePath } : {}),
+    ...(files.length > 0 ? { files } : {}),
     ...(result !== undefined ? { result } : {}),
   };
 }
 
+function extractCcbTextContent(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(extractCcbTextContent).filter(Boolean).join("");
+  }
+
+  const record = asObject(value);
+  if (!record) {
+    return "";
+  }
+
+  return (
+    asString(record.text) ??
+    asString(record.content) ??
+    asString(record.output) ??
+    asString(record.result) ??
+    extractCcbTextContent(record.content)
+  );
+}
+
 function toolResultText(block: Record<string, unknown>): string {
-  const content = block.content;
-  if (typeof content === "string") return content;
-  return contentText(content);
+  return extractCcbTextContent(block.content);
+}
+
+function normalizeCcbTodoStatus(value: unknown): "pending" | "inProgress" | "completed" {
+  if (value === "completed") return "completed";
+  if (value === "inProgress" || value === "in_progress") return "inProgress";
+  return "pending";
+}
+
+function normalizeCcbTodoTasks(input: Record<string, unknown>):
+  | {
+      readonly tasks: ReadonlyArray<{
+        readonly task: string;
+        readonly status: "pending" | "inProgress" | "completed";
+      }>;
+    }
+  | undefined {
+  const todos = Array.isArray(input.todos) ? input.todos : undefined;
+  if (!todos) return undefined;
+
+  const tasks = todos
+    .map((entry) => {
+      const todo = asObject(entry);
+      if (!todo) return undefined;
+      const status = normalizeCcbTodoStatus(todo.status);
+      const content = trimOrNull(todo.content);
+      const activeForm = trimOrNull(todo.activeForm);
+      const task = status === "inProgress" ? (activeForm ?? content) : (content ?? activeForm);
+      return task ? { task, status } : undefined;
+    })
+    .filter(
+      (
+        task,
+      ): task is {
+        readonly task: string;
+        readonly status: "pending" | "inProgress" | "completed";
+      } => task !== undefined,
+    );
+
+  return tasks.length > 0 ? { tasks } : undefined;
+}
+
+function extractExitPlanModePlan(value: unknown): string | undefined {
+  const record = asObject(value);
+  const plan = trimOrNull(record?.plan);
+  return plan ?? undefined;
+}
+
+function normalizeCcbTokenUsage(value: unknown): ThreadTokenUsageSnapshot | undefined {
+  const usage = asObject(value);
+  if (!usage) return undefined;
+
+  const inputTokens =
+    (asNumber(usage.input_tokens) ?? asNumber(usage.inputTokens) ?? 0) +
+    (asNumber(usage.cache_creation_input_tokens) ?? asNumber(usage.cacheCreationInputTokens) ?? 0) +
+    (asNumber(usage.cache_read_input_tokens) ?? asNumber(usage.cacheReadInputTokens) ?? 0);
+  const outputTokens = asNumber(usage.output_tokens) ?? asNumber(usage.outputTokens) ?? 0;
+  const cachedInputTokens =
+    asNumber(usage.cache_read_input_tokens) ?? asNumber(usage.cacheReadInputTokens);
+  const reasoningOutputTokens =
+    asNumber(usage.reasoning_output_tokens) ?? asNumber(usage.reasoningOutputTokens);
+  const toolUses = asNumber(usage.tool_uses) ?? asNumber(usage.toolUses);
+  const durationMs = asNumber(usage.duration_ms) ?? asNumber(usage.durationMs);
+  const totalProcessedTokens =
+    asNumber(usage.total_tokens) ??
+    asNumber(usage.totalTokens) ??
+    (inputTokens + outputTokens > 0 ? inputTokens + outputTokens : undefined);
+  if (totalProcessedTokens === undefined || totalProcessedTokens <= 0) {
+    return undefined;
+  }
+
+  const maxTokens =
+    asNumber(usage.model_context_window) ??
+    asNumber(usage.modelContextWindow) ??
+    asNumber(usage.context_window) ??
+    asNumber(usage.contextWindow);
+  const usedTokens =
+    maxTokens !== undefined ? Math.min(totalProcessedTokens, maxTokens) : totalProcessedTokens;
+
+  return {
+    usedTokens,
+    totalProcessedTokens,
+    lastUsedTokens: usedTokens,
+    ...(maxTokens !== undefined && maxTokens > 0 ? { maxTokens } : {}),
+    ...(inputTokens > 0 ? { inputTokens, lastInputTokens: inputTokens } : {}),
+    ...(outputTokens > 0 ? { outputTokens, lastOutputTokens: outputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined
+      ? {
+          reasoningOutputTokens,
+          lastReasoningOutputTokens: reasoningOutputTokens,
+        }
+      : {}),
+    ...(toolUses !== undefined ? { toolUses } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
+
+function ccbTaskStatus(value: unknown): "completed" | "failed" | "stopped" {
+  return value === "failed" || value === "stopped" ? value : "completed";
 }
 
 function recordAssistantTextDelta(
@@ -703,6 +893,161 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
       });
 
+    const emitContentDelta = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      streamKind: RuntimeContentStreamKind,
+      delta: string,
+      raw: ProviderRuntimeEvent["raw"],
+      itemId?: RuntimeItemId,
+    ) =>
+      Effect.gen(function* () {
+        if (delta.length === 0) {
+          return;
+        }
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "content.delta",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          ...(itemId ? { itemId } : {}),
+          createdAt: stamp.createdAt,
+          payload: {
+            streamKind,
+            delta,
+          },
+          raw,
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            ...(itemId ? { providerItemId: ProviderItemId.makeUnsafe(String(itemId)) } : {}),
+          },
+        });
+        if (streamKind === "assistant_text") {
+          recordAssistantTextDelta(context, turnId, delta);
+        }
+      });
+
+    const emitThreadTokenUsage = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      usage: unknown,
+      raw: ProviderRuntimeEvent["raw"],
+    ) =>
+      Effect.gen(function* () {
+        const normalizedUsage = normalizeCcbTokenUsage(usage);
+        if (!normalizedUsage) {
+          return;
+        }
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "thread.token-usage.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          createdAt: stamp.createdAt,
+          payload: { usage: normalizedUsage },
+          raw,
+          providerRefs: { providerThreadId: context.handle.sessionId },
+        });
+      });
+
+    const emitTodoTasksUpdated = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      toolInput: Record<string, unknown>,
+      raw: ProviderRuntimeEvent["raw"],
+      providerItemId?: string,
+    ) =>
+      Effect.gen(function* () {
+        const tasksPayload = normalizeCcbTodoTasks(toolInput);
+        if (!tasksPayload) {
+          return;
+        }
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "turn.tasks.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          createdAt: stamp.createdAt,
+          payload: tasksPayload,
+          raw,
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            ...(providerItemId ? { providerItemId: ProviderItemId.makeUnsafe(providerItemId) } : {}),
+          },
+        });
+      });
+
+    const emitProposedPlanCompleted = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      planMarkdown: string,
+      raw: ProviderRuntimeEvent["raw"],
+      providerItemId?: string,
+    ) =>
+      Effect.gen(function* () {
+        const trimmed = planMarkdown.trim();
+        if (trimmed.length === 0) {
+          return;
+        }
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "turn.proposed.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          createdAt: stamp.createdAt,
+          payload: { planMarkdown: trimmed },
+          raw,
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            ...(providerItemId ? { providerItemId: ProviderItemId.makeUnsafe(providerItemId) } : {}),
+          },
+        });
+      });
+
+    const emitAssistantMessageCompleted = (
+      context: CcbSessionContext,
+      turnId: TurnId,
+      text: string,
+      raw: ProviderRuntimeEvent["raw"],
+      providerItemId?: string,
+    ) =>
+      Effect.gen(function* () {
+        const detail = text.trim();
+        if (detail.length === 0) {
+          return;
+        }
+        const itemId = RuntimeItemId.makeUnsafe(providerItemId ?? crypto.randomUUID());
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "item.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId,
+          itemId,
+          createdAt: stamp.createdAt,
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            title: "Assistant message",
+            detail,
+          },
+          raw,
+          providerRefs: {
+            providerThreadId: context.handle.sessionId,
+            providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+          },
+        });
+      });
+
     const emitToolLifecycle = (
       context: CcbSessionContext,
       turnId: TurnId,
@@ -771,13 +1116,14 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             const itemId = RuntimeItemId.makeUnsafe(asString(blockObj?.id) ?? crypto.randomUUID());
             const toolName = asString(blockObj?.name) ?? "Tool";
             const input = asObject(blockObj?.input) ?? {};
+            const itemType = ccbToolItemType(toolName);
             const detail = summarizeCcbToolRequest(toolName, input);
             const lastInputFingerprint =
               Object.keys(input).length > 0 ? toolInputFingerprint(input) : undefined;
             const tool: CcbStreamToolItem = {
               itemId,
-              itemType: ccbToolItemType(toolName),
-              title: toolName,
+              itemType,
+              title: ccbToolTitle(itemType, toolName),
               toolName,
               input,
               partialInputJson: "",
@@ -789,6 +1135,15 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             context.streamToolItemsByIndex.set(blockIndex, tool);
             context.pendingToolItems.set(String(itemId), tool);
             yield* emitToolLifecycle(context, turnId, "item.started", tool, raw, "inProgress");
+            if (toolName === "TodoWrite") {
+              yield* emitTodoTasksUpdated(context, turnId, input, raw, String(itemId));
+            }
+            if (toolName === "ExitPlanMode") {
+              const planMarkdown = extractExitPlanModePlan(input);
+              if (planMarkdown) {
+                yield* emitProposedPlanCompleted(context, turnId, planMarkdown, raw, String(itemId));
+              }
+            }
             return;
           }
 
@@ -837,6 +1192,27 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   raw,
                   "inProgress",
                 );
+                if (nextTool.toolName === "TodoWrite") {
+                  yield* emitTodoTasksUpdated(
+                    context,
+                    turnId,
+                    parsedInput,
+                    raw,
+                    String(nextTool.itemId),
+                  );
+                }
+                if (nextTool.toolName === "ExitPlanMode") {
+                  const planMarkdown = extractExitPlanModePlan(parsedInput);
+                  if (planMarkdown) {
+                    yield* emitProposedPlanCompleted(
+                      context,
+                      turnId,
+                      planMarkdown,
+                      raw,
+                      String(nextTool.itemId),
+                    );
+                  }
+                }
               }
               return;
             }
@@ -848,26 +1224,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   ? (asString(delta?.text) ?? "")
                   : "";
             if (text.length > 0) {
-              const stamp = yield* makeStamp();
-              yield* offer({
-                type: "content.delta",
-                eventId: stamp.eventId,
-                provider: PROVIDER,
-                threadId: context.session.threadId,
+              yield* emitContentDelta(
+                context,
                 turnId,
-                createdAt: stamp.createdAt,
-                payload: {
-                  streamKind: deltaType?.includes("thinking")
-                    ? "reasoning_text"
-                    : "assistant_text",
-                  delta: text,
-                },
+                deltaType?.includes("thinking") ? "reasoning_text" : "assistant_text",
+                text,
                 raw,
-                providerRefs: { providerThreadId: context.handle.sessionId },
-              });
-              if (!deltaType?.includes("thinking")) {
-                recordAssistantTextDelta(context, turnId, text);
-              }
+              );
             }
           }
           if (eventType === "content_block_stop" && blockIndex !== undefined) {
@@ -890,18 +1253,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             } else if (blockType === "thinking") {
               const text = asString(blockObj?.thinking) ?? asString(blockObj?.text) ?? "";
               if (text.length > 0) {
-                const stamp = yield* makeStamp();
-                yield* offer({
-                  type: "content.delta",
-                  eventId: stamp.eventId,
-                  provider: PROVIDER,
-                  threadId: context.session.threadId,
-                  turnId,
-                  createdAt: stamp.createdAt,
-                  payload: { streamKind: "reasoning_text", delta: text },
-                  raw,
-                  providerRefs: { providerThreadId: context.handle.sessionId },
-                });
+                yield* emitContentDelta(context, turnId, "reasoning_text", text, raw);
               }
             } else if (
               blockType === "tool_use" ||
@@ -922,7 +1274,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               const tool: PendingToolItem & { readonly itemId: RuntimeItemId } = {
                 itemId,
                 itemType,
-                title: toolName,
+                title: ccbToolTitle(itemType, toolName),
                 toolName,
                 input,
                 ...(detail ? { detail } : {}),
@@ -938,24 +1290,43 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               ) {
                 yield* emitToolLifecycle(context, turnId, "item.updated", tool, raw, "inProgress");
               }
+              if (toolName === "TodoWrite") {
+                yield* emitTodoTasksUpdated(context, turnId, input, raw, String(itemId));
+              }
+              if (toolName === "ExitPlanMode") {
+                const planMarkdown = extractExitPlanModePlan(input);
+                if (planMarkdown) {
+                  yield* emitProposedPlanCompleted(context, turnId, planMarkdown, raw, String(itemId));
+                }
+              }
             }
           }
+          const assistantProviderItemId =
+            asString(asObject(message.message)?.id) ?? asString(message.uuid);
           const finalText = finalTextBlocks.join("\n");
           const finalDelta = assistantFinalTextDelta(context, turnId, finalText);
           if (finalDelta.length > 0) {
-            const stamp = yield* makeStamp();
-            yield* offer({
-              type: "content.delta",
-              eventId: stamp.eventId,
-              provider: PROVIDER,
-              threadId: context.session.threadId,
+            yield* emitContentDelta(
+              context,
               turnId,
-              createdAt: stamp.createdAt,
-              payload: { streamKind: "assistant_text", delta: finalDelta },
+              "assistant_text",
+              finalDelta,
               raw,
-              providerRefs: { providerThreadId: context.handle.sessionId },
-            });
-            recordAssistantTextDelta(context, turnId, finalDelta);
+              assistantProviderItemId
+                ? RuntimeItemId.makeUnsafe(assistantProviderItemId)
+                : undefined,
+            );
+          }
+          yield* emitAssistantMessageCompleted(
+            context,
+            turnId,
+            finalText,
+            raw,
+            assistantProviderItemId,
+          );
+          const messageUsage = asObject(message.message)?.usage ?? message.usage;
+          if (messageUsage) {
+            yield* emitThreadTokenUsage(context, turnId, messageUsage, raw);
           }
           return;
         }
@@ -980,7 +1351,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               const tool: PendingToolItem & { readonly itemId: RuntimeItemId } = {
                 itemId,
                 itemType: stored?.itemType ?? "dynamic_tool_call",
-                title: stored?.title ?? "Tool",
+                title: stored?.title ?? "Tool call",
                 toolName: stored?.toolName ?? stored?.title ?? "Tool",
                 input: stored?.input ?? {},
                 ...(stored?.detail
@@ -993,27 +1364,18 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   : {}),
               };
               context.turns.at(-1)?.items.push(block);
+              yield* emitToolLifecycle(
+                context,
+                turnId,
+                "item.updated",
+                tool,
+                raw,
+                block.is_error === true ? "failed" : "inProgress",
+                block,
+              );
               const streamKind = ccbToolResultStreamKind(tool.itemType);
               if (streamKind && resultText.length > 0) {
-                const deltaStamp = yield* makeStamp();
-                yield* offer({
-                  type: "content.delta",
-                  eventId: deltaStamp.eventId,
-                  provider: PROVIDER,
-                  threadId: context.session.threadId,
-                  turnId,
-                  itemId,
-                  createdAt: deltaStamp.createdAt,
-                  payload: {
-                    streamKind,
-                    delta: resultText,
-                  },
-                  raw,
-                  providerRefs: {
-                    providerThreadId: context.handle.sessionId,
-                    providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
-                  },
-                });
+                yield* emitContentDelta(context, turnId, streamKind, resultText, raw, itemId);
               }
               yield* emitToolLifecycle(
                 context,
@@ -1048,28 +1410,272 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           return;
         }
 
-        if (messageType === "system" && asString(message.subtype) === "compact_boundary") {
-          const itemId = RuntimeItemId.makeUnsafe(asString(message.uuid) ?? crypto.randomUUID());
+        if (messageType === "system") {
+          const subtype = asString(message.subtype);
           const stamp = yield* makeStamp();
-          yield* offer({
-            type: "item.completed",
+          const base = {
             eventId: stamp.eventId,
             provider: PROVIDER,
             threadId: context.session.threadId,
             turnId,
-            itemId,
+            createdAt: stamp.createdAt,
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          } satisfies Omit<ProviderRuntimeEvent, "type" | "payload">;
+
+          switch (subtype) {
+            case "init":
+              yield* offer({
+                ...base,
+                type: "session.configured",
+                payload: { config: message },
+              });
+              return;
+            case "status":
+              yield* offer({
+                ...base,
+                type: "session.state.changed",
+                payload: {
+                  state: asString(message.status) === "compacting" ? "waiting" : "running",
+                  reason: `status:${asString(message.status) ?? "active"}`,
+                  detail: message,
+                },
+              });
+              return;
+            case "compact_boundary": {
+              const itemId = RuntimeItemId.makeUnsafe(asString(message.uuid) ?? crypto.randomUUID());
+              yield* offer({
+                ...base,
+                type: "thread.state.changed",
+                payload: {
+                  state: "compacted",
+                  detail: message,
+                },
+              });
+              yield* offer({
+                ...base,
+                type: "item.completed",
+                itemId,
+                payload: {
+                  itemType: "context_compaction",
+                  status: "completed",
+                  title: "Context compacted",
+                  data: message,
+                },
+                providerRefs: {
+                  providerThreadId: context.handle.sessionId,
+                  providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+                },
+              });
+              return;
+            }
+            case "hook_started":
+              yield* offer({
+                ...base,
+                type: "hook.started",
+                payload: {
+                  hookId: asString(message.hook_id) ?? "hook",
+                  hookName: asString(message.hook_name) ?? "Hook",
+                  hookEvent: asString(message.hook_event) ?? "event",
+                },
+              });
+              return;
+            case "hook_progress":
+              yield* offer({
+                ...base,
+                type: "hook.progress",
+                payload: {
+                  hookId: asString(message.hook_id) ?? "hook",
+                  ...(asString(message.output) ? { output: asString(message.output) } : {}),
+                  ...(asString(message.stdout) ? { stdout: asString(message.stdout) } : {}),
+                  ...(asString(message.stderr) ? { stderr: asString(message.stderr) } : {}),
+                },
+              });
+              return;
+            case "hook_response":
+              yield* offer({
+                ...base,
+                type: "hook.completed",
+                payload: {
+                  hookId: asString(message.hook_id) ?? "hook",
+                  outcome:
+                    message.outcome === "error" || message.outcome === "cancelled"
+                      ? message.outcome
+                      : "success",
+                  ...(asString(message.output) ? { output: asString(message.output) } : {}),
+                  ...(asString(message.stdout) ? { stdout: asString(message.stdout) } : {}),
+                  ...(asString(message.stderr) ? { stderr: asString(message.stderr) } : {}),
+                  ...(asNumber(message.exit_code) !== undefined ? { exitCode: asNumber(message.exit_code) } : {}),
+                },
+              });
+              return;
+            case "task_started": {
+              const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              yield* offer({
+                ...base,
+                type: "task.started",
+                payload: {
+                  taskId: RuntimeTaskId.makeUnsafe(taskId),
+                  ...(asString(message.description) ? { description: asString(message.description) } : {}),
+                  ...(asString(message.task_type) ? { taskType: asString(message.task_type) } : {}),
+                },
+              });
+              return;
+            }
+            case "task_progress": {
+              if (message.usage) {
+                yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
+              }
+              const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              yield* offer({
+                ...base,
+                type: "task.progress",
+                payload: {
+                  taskId: RuntimeTaskId.makeUnsafe(taskId),
+                  description: asString(message.description) ?? "Task progress",
+                  ...(asString(message.summary) ? { summary: asString(message.summary) } : {}),
+                  ...(message.usage ? { usage: message.usage } : {}),
+                  ...(asString(message.last_tool_name) ? { lastToolName: asString(message.last_tool_name) } : {}),
+                },
+              });
+              return;
+            }
+            case "task_notification": {
+              if (message.usage) {
+                yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
+              }
+              const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              yield* offer({
+                ...base,
+                type: "task.completed",
+                payload: {
+                  taskId: RuntimeTaskId.makeUnsafe(taskId),
+                  status: ccbTaskStatus(message.status),
+                  ...(asString(message.summary) ? { summary: asString(message.summary) } : {}),
+                  ...(message.usage ? { usage: message.usage } : {}),
+                },
+              });
+              return;
+            }
+            case "files_persisted":
+              yield* offer({
+                ...base,
+                type: "files.persisted",
+                payload: {
+                  files: (asArray(message.files) ?? [])
+                    .map(asObject)
+                    .filter((file): file is Record<string, unknown> => file !== undefined)
+                    .map((file) => ({
+                      filename: asString(file.filename) ?? "file",
+                      fileId: asString(file.file_id) ?? asString(file.fileId) ?? "file",
+                    })),
+                  failed: (asArray(message.failed) ?? [])
+                    .map(asObject)
+                    .filter((file): file is Record<string, unknown> => file !== undefined)
+                    .map((file) => ({
+                      filename: asString(file.filename) ?? "file",
+                      error: asString(file.error) ?? "Failed to persist file",
+                    })),
+                },
+              });
+              return;
+            default:
+              yield* offer({
+                ...base,
+                type: "runtime.warning",
+                payload: {
+                  message: `Unhandled CCB system message subtype '${subtype ?? "unknown"}'.`,
+                  detail: message,
+                },
+              });
+              return;
+          }
+        }
+
+        if (messageType === "tool_progress") {
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "tool.progress",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
             createdAt: stamp.createdAt,
             payload: {
-              itemType: "context_compaction",
-              status: "completed",
-              title: "Context compacted",
-              data: message,
+              ...(asString(message.tool_use_id) ? { toolUseId: asString(message.tool_use_id) } : {}),
+              ...(asString(message.tool_name) ? { toolName: asString(message.tool_name) } : {}),
+              ...(asNumber(message.elapsed_time_seconds) !== undefined
+                ? { elapsedSeconds: asNumber(message.elapsed_time_seconds) }
+                : {}),
+              ...(asString(message.task_id) ? { summary: `task:${asString(message.task_id)}` } : {}),
             },
             raw,
-            providerRefs: {
-              providerThreadId: context.handle.sessionId,
-              providerItemId: ProviderItemId.makeUnsafe(itemId),
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
+        }
+
+        if (messageType === "tool_use_summary") {
+          const summary = asString(message.summary);
+          if (!summary) {
+            return;
+          }
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "tool.summary",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: {
+              summary,
+              ...(asArray(message.preceding_tool_use_ids)?.every((value) => typeof value === "string")
+                ? { precedingToolUseIds: message.preceding_tool_use_ids as string[] }
+                : {}),
             },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
+        }
+
+        if (messageType === "auth_status") {
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "auth.status",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: {
+              ...(typeof message.isAuthenticating === "boolean"
+                ? { isAuthenticating: message.isAuthenticating }
+                : {}),
+              ...(asArray(message.output)?.every((value) => typeof value === "string")
+                ? { output: message.output as string[] }
+                : {}),
+              ...(asString(message.error) ? { error: asString(message.error) } : {}),
+            },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
+          });
+          return;
+        }
+
+        if (messageType === "rate_limit_event") {
+          const stamp = yield* makeStamp();
+          yield* offer({
+            type: "account.rate-limits.updated",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            turnId,
+            createdAt: stamp.createdAt,
+            payload: { rateLimits: message },
+            raw,
+            providerRefs: { providerThreadId: context.handle.sessionId },
           });
           return;
         }
@@ -1091,6 +1697,9 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           );
           const stamp = yield* makeStamp();
           const isError = message.is_error === true;
+          if (message.usage) {
+            yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
+          }
           yield* offer({
             type: "turn.completed",
             eventId: stamp.eventId,
@@ -1134,6 +1743,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const pendingApprovals = new Map<string, PendingApproval>();
         const runtimeMode = input.runtimeMode;
         const resumeCursor = asCcbResumeCursor(input.resumeCursor);
+        let contextRef: CcbSessionContext | undefined;
         const initialMessages = yield* Effect.tryPromise({
           try: () => readCcbTranscript(resumeCursor?.transcriptPath),
           catch: (cause) =>
@@ -1163,8 +1773,60 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
                 : {}),
               ...(initialMessages ? { initialMessages } : {}),
-              canUseTool: async (tool, toolInput) => {
+              canUseTool: async (...args: ReadonlyArray<unknown>) => {
+                const [tool, toolInput, , , toolUseId] = args;
                 const inputObject = asObject(toolInput) ?? {};
+                const context = contextRef;
+                const toolName = asString(asObject(tool)?.name) ?? "Tool";
+                if (context?.activeTurnId) {
+                  const itemId = RuntimeItemId.makeUnsafe(asString(toolUseId) ?? crypto.randomUUID());
+                  const pendingKey = String(itemId);
+                  if (!context.pendingToolItems.has(pendingKey)) {
+                    const itemType = ccbToolItemType(toolName);
+                    const detail = summarizeCcbToolRequest(toolName, inputObject);
+                    const inputFingerprint =
+                      Object.keys(inputObject).length > 0
+                        ? toolInputFingerprint(inputObject)
+                        : undefined;
+                    const toolItem: PendingToolItem & { readonly itemId: RuntimeItemId } = {
+                      itemId,
+                      itemType,
+                      title: ccbToolTitle(itemType, toolName),
+                      toolName,
+                      input: inputObject,
+                      ...(detail ? { detail } : {}),
+                      ...(inputFingerprint ? { lastInputFingerprint: inputFingerprint } : {}),
+                    };
+                    context.pendingToolItems.set(pendingKey, toolItem);
+                    await Effect.runPromise(
+                      Queue.offer(runtimeEventQueue, {
+                        type: "item.started",
+                        eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                        provider: PROVIDER,
+                        threadId,
+                        turnId: context.activeTurnId,
+                        itemId,
+                        createdAt: new Date().toISOString(),
+                        payload: {
+                          itemType,
+                          status: "inProgress",
+                          title: toolItem.title,
+                          ...(detail ? { detail } : {}),
+                          data: ccbToolData(toolName, inputObject),
+                        },
+                        raw: {
+                          source: "ccb.sdk.permission",
+                          method: "canUseTool",
+                          payload: { tool, input: toolInput, toolUseId },
+                        },
+                        providerRefs: {
+                          providerThreadId: context.handle.sessionId,
+                          providerItemId: ProviderItemId.makeUnsafe(String(itemId)),
+                        },
+                      } satisfies ProviderRuntimeEvent),
+                    );
+                  }
+                }
                 if (runtimeMode === "full-access") {
                   return approvalDecisionToCcb("accept", inputObject);
                 }
@@ -1194,13 +1856,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   createdAt: stamp.createdAt,
                   payload: {
                     requestType: "dynamic_tool_call",
-                    detail: asString(asObject(tool)?.name) ?? "CCB tool request",
+                    detail: toolName,
                     args: inputObject,
                   },
                   raw: {
                     source: "ccb.sdk.permission",
                     method: "canUseTool",
-                    payload: { tool, input: toolInput },
+                    payload: { tool, input: toolInput, toolUseId },
                   },
                 } satisfies ProviderRuntimeEvent));
 
@@ -1249,6 +1911,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           stopped: false,
         };
         sessions.set(threadId, context);
+        contextRef = context;
 
         const stamp = yield* makeStamp();
         yield* offer({
