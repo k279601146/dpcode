@@ -1407,6 +1407,9 @@ export default function ChatView({
   const claudeDynamicAgentsQuery = useQuery(
     providerAgentsQueryOptions({ provider: "claudeAgent" }),
   );
+  const ccbDynamicAgentsQuery = useQuery(
+    providerAgentsQueryOptions({ provider: "ccb", enabled: selectedProvider === "ccb" }),
+  );
   const codexDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "codex" }));
   const openCodeDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "opencode" }));
   const modelOptionsByProvider = useMemo(() => {
@@ -2278,7 +2281,9 @@ export default function ChatView({
     });
   const dynamicAgents = useMemo(() => {
     const query =
-      selectedProvider === "claudeAgent"
+      selectedProvider === "ccb"
+        ? ccbDynamicAgentsQuery
+        : selectedProvider === "claudeAgent"
         ? claudeDynamicAgentsQuery
         : selectedProvider === "opencode"
           ? openCodeDynamicAgentsQuery
@@ -2290,6 +2295,7 @@ export default function ChatView({
     }));
   }, [
     selectedProvider,
+    ccbDynamicAgentsQuery.data,
     claudeDynamicAgentsQuery.data,
     codexDynamicAgentsQuery.data,
     openCodeDynamicAgentsQuery.data,
@@ -2312,6 +2318,7 @@ export default function ChatView({
     canOfferForkCommand,
     canOfferSideCommand,
     dynamicAgents,
+    useStaticAgentFallback: selectedProvider !== "ccb",
   });
   const composerMenuItems = useMemo(() => {
     if (composerCommandPicker === "fork-target") {

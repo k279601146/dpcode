@@ -29,6 +29,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { buildClaudeSubagentPrompt } from "@t3tools/shared/agentMentions";
 import {
   DateTime,
   Effect,
@@ -51,6 +52,8 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
 import { resolveCcbVendorPath } from "../ccbVendorPath.ts";
 import { CcbAdapter, type CcbAdapterShape } from "../Services/CcbAdapter.ts";
 import { withProviderPlanModePrompt } from "../planMode.ts";
@@ -58,7 +61,13 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v3";
+const CCB_BRIDGE_CACHE_VERSION = "v4";
+const SUPPORTED_CCB_IMAGE_MIME_TYPES = new Set([
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
 const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
   "MACRO.VERSION": JSON.stringify("2.1.888"),
   "MACRO.BUILD_TIME": JSON.stringify(new Date().toISOString()),
@@ -68,6 +77,12 @@ const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
   "MACRO.PACKAGE_URL": JSON.stringify(""),
   "MACRO.VERSION_CHANGELOG": JSON.stringify(""),
 };
+const DPCODE_CCB_APPEND_SYSTEM_PROMPT = [
+  "DPCode is a coding workspace UI. When the user asks you to create, edit, delete, inspect, install, run, or verify project files, you must use the available filesystem and shell tools to perform the work before saying it is done.",
+  "Do not say a command is running, completed, or scheduled unless you have actually called the appropriate tool and observed its result. If a required tool is unavailable, say that directly instead of pretending to have executed it.",
+  "On Windows, prefer the PowerShell tool for shell commands when it is available.",
+  "Use non-interactive commands in this headless coding environment. For project scaffolding commands such as create-next-app, pass flags that avoid prompts, and verify created files with filesystem tools before reporting success.",
+].join("\n");
 const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
   baseDir: dirname(fileURLToPath(import.meta.url)),
 });
@@ -81,6 +96,7 @@ type CcbBridgeModule = {
     openAiBaseUrl?: string;
     openAiApiKey?: string;
     initialMessages?: unknown[];
+    appendSystemPrompt?: string;
     canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
   }): Promise<CcbSessionHandle>;
   listDpcodeCcbCommands?(cwd: string): Promise<ReadonlyArray<{ name: string; description?: string }>>;
@@ -97,6 +113,16 @@ type CcbBridgeModule = {
       shortDescription?: string;
     }>
   >;
+  listDpcodeCcbAgents?(
+    cwd: string,
+  ): Promise<
+    ReadonlyArray<{
+      name: string;
+      displayName?: string;
+      description?: string;
+      model?: string;
+    }>
+  >;
   listDpcodeCcbMcpStatus?(cwd: string): Promise<{
     servers: ReadonlyArray<{
       name: string;
@@ -111,7 +137,7 @@ type CcbBridgeModule = {
 type CcbSessionHandle = {
   sessionId: string;
   submitMessage(
-    prompt: string,
+    prompt: string | ReadonlyArray<unknown>,
     options?: { uuid?: string; isMeta?: boolean },
   ): AsyncGenerator<Record<string, unknown>, void, unknown>;
   interrupt(): void;
@@ -119,6 +145,7 @@ type CcbSessionHandle = {
   getAbortSignal(): AbortSignal;
   getMessages(): readonly unknown[];
   setModel(model: string): void;
+  setPermissionMode?(mode: string): void;
 };
 
 type PendingApproval = {
@@ -148,6 +175,7 @@ type CcbSessionContext = {
   session: ProviderSession;
   readonly handle: CcbSessionHandle;
   readonly transcriptPath: string;
+  readonly basePermissionMode: string;
   readonly pendingApprovals: Map<string, PendingApproval>;
   readonly pendingToolItems: Map<string, PendingToolItem>;
   readonly streamToolItemsByIndex: Map<number, CcbStreamToolItem>;
@@ -163,6 +191,7 @@ export interface CcbAdapterLiveOptions {
   readonly bridgeModule?: CcbBridgeModule;
   readonly bridgeBundlePath?: string;
   readonly runBridgeBuild?: (input: CcbBridgeBuildInput) => Promise<void>;
+  readonly attachmentsDir?: string;
 }
 
 export interface CcbBridgeBuildInput {
@@ -700,6 +729,11 @@ function ccbResultErrorMessage(message: Record<string, unknown>): string | undef
   return asString(message.result) ?? "CCB turn failed";
 }
 
+function ccbMissingToolResultMessage(tool: PendingToolItem): string {
+  const detail = tool.detail ? ` (${tool.detail})` : "";
+  return `CCB started ${tool.toolName}${detail} but did not emit a tool result. The command or file operation may not have run.`;
+}
+
 function ccbRateLimitPayload(message: Record<string, unknown>): unknown {
   return asObject(message.rate_limit_info) ?? asObject(message.rateLimitInfo) ?? message;
 }
@@ -742,15 +776,135 @@ function modelFromInput(input: ProviderSendTurnInput): string | undefined {
 }
 
 function buildPromptText(input: ProviderSendTurnInput): string {
+  const subagentPrompt = buildClaudeSubagentPrompt(input.input?.trim() ?? "", PROVIDER).prompt;
   const prompt = withProviderPlanModePrompt({
-    text: input.input?.trim() ?? "",
+    text: subagentPrompt,
     interactionMode: input.interactionMode,
   });
+  const skills = input.skills ?? [];
+  const mentions = input.mentions ?? [];
+  const skillsPrompt =
+    skills.length > 0
+      ? [
+          "",
+          "DPCode selected these skills for this turn. Use them when relevant:",
+          ...skills.map((skill) => `- ${skill.name} (${skill.path})`),
+        ].join("\n")
+      : "";
+  const mentionsPrompt =
+    mentions.length > 0
+      ? [
+          "",
+          "DPCode selected these references for this turn:",
+          ...mentions.map((mention) => `- ${mention.name} (${mention.path})`),
+        ].join("\n")
+      : "";
   return [
     prompt,
+    skillsPrompt,
+    mentionsPrompt,
     "",
     "DPCode shows file changes in separate UI cards. When you create, edit, or delete files, do not paste full file contents in the chat response unless the user explicitly asks for the contents. Mention the changed paths and summarize the result instead.",
-  ].join("\n");
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n");
+}
+
+type CcbQueryInput = string | ReadonlyArray<Record<string, unknown>>;
+
+function buildCcbImageContentBlock(input: {
+  readonly mimeType: string;
+  readonly bytes: Uint8Array;
+}): Record<string, unknown> {
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: input.mimeType,
+      data: Buffer.from(input.bytes).toString("base64"),
+    },
+  };
+}
+
+function buildCcbQueryInput(
+  input: ProviderSendTurnInput,
+  attachmentsDir: string,
+): Effect.Effect<CcbQueryInput, ProviderAdapterRequestError> {
+  return Effect.gen(function* () {
+    const text = buildPromptText(input);
+    const content: Array<Record<string, unknown>> = [];
+
+    if (text.length > 0) {
+      content.push({ type: "text", text });
+    }
+
+    for (const attachment of input.attachments ?? []) {
+      if (attachment.type !== "image") {
+        continue;
+      }
+
+      if (!SUPPORTED_CCB_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: `Unsupported CCB image attachment type '${attachment.mimeType}'.`,
+        });
+      }
+
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath || !existsSync(attachmentPath)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: `Invalid attachment id '${attachment.id}'.`,
+        });
+      }
+
+      const bytes = yield* Effect.tryPromise({
+        try: () => readFile(attachmentPath),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail: toMessage(cause, "Failed to read attachment file."),
+            cause,
+          }),
+      });
+
+      content.push(
+        buildCcbImageContentBlock({
+          mimeType: attachment.mimeType,
+          bytes,
+        }),
+      );
+    }
+
+    return content.length === 1 && content[0]?.type === "text" ? text : content;
+  });
+}
+
+function setCcbPermissionMode(
+  context: CcbSessionContext,
+  mode: string,
+): Effect.Effect<void, ProviderAdapterRequestError> {
+  return Effect.try({
+    try: () => {
+      if (!context.handle.setPermissionMode) {
+        throw new Error("CCB bridge does not support permission mode switching.");
+      }
+      context.handle.setPermissionMode(mode);
+    },
+    catch: (cause) =>
+      new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/setPermissionMode",
+        detail: toMessage(cause, "Failed to set CCB permission mode"),
+        cause,
+      }),
+  });
 }
 
 function normalizeCcbOpenAiBaseUrl(value: string | undefined): string | undefined {
@@ -985,6 +1139,8 @@ function approvalDecisionToCcb(
 
 function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
   return Effect.gen(function* () {
+    const serverConfig = options?.attachmentsDir ? undefined : yield* ServerConfig;
+    const attachmentsDir = options?.attachmentsDir ?? serverConfig!.attachmentsDir;
     const sessions = new Map<ThreadId, CcbSessionContext>();
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -2044,11 +2200,22 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           const isError = message.is_error === true;
           const modelUsage = asObject(message.modelUsage) ?? asObject(message.model_usage);
           const totalCostUsd = asNumber(message.total_cost_usd) ?? asNumber(message.totalCostUsd);
-          const errorMessage = isError ? ccbResultErrorMessage(message) : undefined;
+          const pendingTools = Array.from(context.pendingToolItems.entries());
+          const missingToolResultMessages = pendingTools.map(([, tool]) =>
+            ccbMissingToolResultMessage(tool),
+          );
+          const effectiveIsError = isError || missingToolResultMessages.length > 0;
+          const errorMessage =
+            isError
+              ? ccbResultErrorMessage(message)
+              : missingToolResultMessages.length > 0
+                ? missingToolResultMessages.join("\n")
+                : undefined;
           if (message.usage) {
             yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
           }
-          for (const [pendingKey, tool] of context.pendingToolItems) {
+          for (const [pendingKey, tool] of pendingTools) {
+            const missingToolResultMessage = ccbMissingToolResultMessage(tool);
             yield* emitToolLifecycle(
               context,
               turnId,
@@ -2058,8 +2225,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 ...raw,
                 method: `${method}.pending-tool-complete`,
               },
-              isError ? "failed" : "completed",
-              message,
+              "failed",
+              {
+                ...message,
+                is_error: true,
+                content: missingToolResultMessage,
+                missing_tool_result: true,
+              },
             );
             context.pendingToolItems.delete(pendingKey);
           }
@@ -2071,7 +2243,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             turnId,
             createdAt: stamp.createdAt,
             payload: {
-              state: isError ? "failed" : "completed",
+              state: effectiveIsError ? "failed" : "completed",
               stopReason: ccbResultStopReason(message),
               usage: message.usage,
               ...(modelUsage ? { modelUsage } : {}),
@@ -2083,7 +2255,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           });
           context.streamedAssistantTextByTurnId.delete(String(turnId));
           context.streamToolItemsByIndex.clear();
-          if (isError) {
+          if (effectiveIsError) {
             yield* emitRuntimeError(context, errorMessage ?? "CCB turn failed", message);
           }
         }
@@ -2135,6 +2307,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
                 : {}),
               ...(initialMessages ? { initialMessages } : {}),
+              appendSystemPrompt: DPCODE_CCB_APPEND_SYSTEM_PROMPT,
               canUseTool: async (...args: ReadonlyArray<unknown>) => {
                 const [tool, toolInput, , , toolUseId] = args;
                 const inputObject = asObject(toolInput) ?? {};
@@ -2265,6 +2438,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
         const transcriptPath =
           resumeCursor?.transcriptPath ?? ccbTranscriptPath(threadId, handle.sessionId);
+        const basePermissionMode = input.providerOptions?.ccb?.permissionMode ?? "default";
 
         const session: ProviderSession = {
           provider: PROVIDER,
@@ -2286,6 +2460,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           session,
           handle,
           transcriptPath,
+          basePermissionMode,
           pendingApprovals,
           pendingToolItems: new Map(),
           streamToolItemsByIndex: new Map(),
@@ -2347,6 +2522,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         if (modelFromInput(input)) {
           context.handle.setModel(modelFromInput(input)!);
         }
+        if (input.interactionMode === "plan") {
+          yield* setCcbPermissionMode(context, "plan");
+        } else if (input.interactionMode === "default") {
+          yield* setCcbPermissionMode(context, context.basePermissionMode);
+        }
         context.handle.resetAbortController();
 
         const turnId = TurnId.makeUnsafe(yield* Random.nextUUIDv4);
@@ -2380,11 +2560,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
         yield* emitSessionState(context, "running");
 
-        const prompt = buildPromptText(input);
+        const queryInput = yield* buildCcbQueryInput(input, attachmentsDir);
         const runStream = Effect.tryPromise({
           try: async () => {
             try {
-              for await (const message of context.handle.submitMessage(prompt, { uuid: turnId })) {
+              for await (const message of context.handle.submitMessage(queryInput, { uuid: turnId })) {
                 await Effect.runPromise(mapSdkMessage(context, turnId, message));
               }
               context.activeTurnId = undefined;
@@ -2768,7 +2948,32 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
       });
 
     const listAgents: NonNullable<CcbAdapterShape["listAgents"]> = () =>
-      Effect.succeed({ agents: [], source: PROVIDER, cached: false } satisfies ProviderListAgentsResult);
+      Effect.gen(function* () {
+        const bridge = yield* loadBridgeModule();
+        if (!bridge.listDpcodeCcbAgents) {
+          return { agents: [], source: PROVIDER, cached: false } satisfies ProviderListAgentsResult;
+        }
+        const agents = yield* Effect.tryPromise({
+          try: () => bridge.listDpcodeCcbAgents!(process.cwd()),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "agents/list",
+              detail: toMessage(cause, "Failed to list CCB agents"),
+              cause,
+            }),
+        });
+        return {
+          agents: agents.map((agent) => ({
+            name: agent.name,
+            displayName: agent.displayName ?? agent.name,
+            ...(agent.description ? { description: agent.description } : {}),
+            ...(agent.model ? { model: agent.model } : {}),
+          })),
+          source: PROVIDER,
+          cached: false,
+        } satisfies ProviderListAgentsResult;
+      });
 
     const composerCapabilities: ProviderComposerCapabilities = {
       provider: PROVIDER,

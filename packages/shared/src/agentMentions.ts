@@ -107,8 +107,27 @@ export function buildClaudeSubagentPrompt(text: string): {
       readonly definition: ResolvedAgentAlias & ClaudeSubagentAliasDefinition;
     }
   >;
+};
+export function buildClaudeSubagentPrompt(text: string, provider: "ccb" | "claudeAgent"): {
+  readonly prompt: string;
+  readonly invocations: ReadonlyArray<
+    ParsedAgentMentionInvocation & {
+      readonly definition: ResolvedAgentAlias & ClaudeSubagentAliasDefinition;
+    }
+  >;
+};
+export function buildClaudeSubagentPrompt(
+  text: string,
+  provider: "ccb" | "claudeAgent" = "claudeAgent",
+): {
+  readonly prompt: string;
+  readonly invocations: ReadonlyArray<
+    ParsedAgentMentionInvocation & {
+      readonly definition: ResolvedAgentAlias & ClaudeSubagentAliasDefinition;
+    }
+  >;
 } {
-  const invocations = parseAgentMentionInvocations(text, "claudeAgent").filter(
+  const invocations = parseAgentMentionInvocations(text, provider).filter(
     (
       invocation,
     ): invocation is ParsedAgentMentionInvocation & {

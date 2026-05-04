@@ -177,7 +177,10 @@ function makeCompactFakeBridge(): CcbAdapterLiveOptions & {
     bridgeModule: {
       createDpcodeCcbSession: vi.fn(async () => ({
         sessionId: "ccb-session-compact",
-        async *submitMessage(prompt: string) {
+        async *submitMessage(prompt: string | ReadonlyArray<unknown>) {
+          if (typeof prompt !== "string") {
+            throw new Error("Expected compact prompt to be a string.");
+          }
           submitPrompts.push(prompt);
           if (prompt === "/compact") {
             yield {
@@ -201,12 +204,12 @@ function makeCompactFakeBridge(): CcbAdapterLiveOptions & {
 
 function makeMultiTurnFakeBridge(): CcbAdapterLiveOptions & {
   createSession: ReturnType<typeof vi.fn>;
-  submitPrompts: string[];
+  submitPrompts: Array<string | ReadonlyArray<unknown>>;
 } {
-  const submitPrompts: string[] = [];
+  const submitPrompts: Array<string | ReadonlyArray<unknown>> = [];
   const createSession = vi.fn(async () => ({
     sessionId: "ccb-session-multi-turn",
-    async *submitMessage(prompt: string) {
+    async *submitMessage(prompt: string | ReadonlyArray<unknown>) {
       submitPrompts.push(prompt);
       yield { type: "result", subtype: "success", is_error: false };
     },
@@ -264,7 +267,16 @@ export async function createDpcodeCcbSession() {
   };
 }
 
-const layer = (options: CcbAdapterLiveOptions) => it.layer(makeCcbAdapterLive(options));
+function makeTestAttachmentsDir(): string {
+  const dir = join(mkdtempSync(join(tmpdir(), "dpcode-ccb-attachments-")), "attachments");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+const layer = (options: CcbAdapterLiveOptions) => {
+  (options as { attachmentsDir?: string }).attachmentsDir ??= makeTestAttachmentsDir();
+  return it.layer(makeCcbAdapterLive(options));
+};
 
 function waitForTranscript(path: string): Promise<void> {
   const deadline = Date.now() + 2_000;
@@ -352,6 +364,253 @@ layer(
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
+    }),
+  );
+});
+
+const appendSystemPromptBridge = (() => {
+  const createSession = vi.fn(async () => ({
+    sessionId: "ccb-session-append-system-prompt",
+    async *submitMessage() {
+      yield { type: "result", subtype: "success", is_error: false };
+    },
+    interrupt: vi.fn(),
+    resetAbortController: vi.fn(),
+    getAbortSignal: () => new AbortController().signal,
+    getMessages: () => [],
+    setModel: vi.fn(),
+  }));
+  return {
+    createSession,
+    bridgeModule: {
+      createDpcodeCcbSession: createSession,
+    },
+  } satisfies CcbAdapterLiveOptions & {
+    createSession: ReturnType<typeof vi.fn>;
+  };
+})();
+
+layer(appendSystemPromptBridge)("CcbAdapterLive system prompt", (it) => {
+  it.effect("tells CCB to use tools before claiming project work is done", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-append-system-prompt-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const options = appendSystemPromptBridge.createSession.mock.calls[0]?.[0] as
+        | { appendSystemPrompt?: string }
+        | undefined;
+      assert.match(options?.appendSystemPrompt ?? "", /must use the available filesystem and shell tools/);
+      assert.match(options?.appendSystemPrompt ?? "", /Do not say a command is running/);
+      assert.match(options?.appendSystemPrompt ?? "", /PowerShell tool/);
+      assert.match(options?.appendSystemPrompt ?? "", /Use non-interactive commands/);
+    }),
+  );
+});
+
+const inputBridge = (() => {
+  const submitInputs: Array<unknown> = [];
+  return {
+    submitInputs,
+    attachmentsDir: makeTestAttachmentsDir(),
+    bridgeModule: {
+      createDpcodeCcbSession: vi.fn(async () => ({
+        sessionId: "ccb-session-input",
+        async *submitMessage(prompt: unknown) {
+          submitInputs.push(prompt);
+          yield { type: "result", subtype: "success", is_error: false };
+        },
+        interrupt: vi.fn(),
+        resetAbortController: vi.fn(),
+        getAbortSignal: () => new AbortController().signal,
+        getMessages: () => [],
+        setModel: vi.fn(),
+      })),
+    },
+  } satisfies CcbAdapterLiveOptions & {
+    submitInputs: Array<unknown>;
+    attachmentsDir: string;
+  };
+})();
+
+layer(inputBridge)("CcbAdapterLive turn input", (it) => {
+  it.effect("builds CCB content blocks for text, images, skills, and mentions", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-input-blocks-test");
+      const attachmentId = "ccb-image-input";
+      writeFileSync(join(inputBridge.attachmentsDir, `${attachmentId}.png`), Buffer.from("png"));
+
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed" && event.threadId === threadId),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Use @plan(outline the work)",
+        attachments: [
+          {
+            type: "image",
+            id: attachmentId,
+            name: "input.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+          },
+        ],
+        skills: [{ name: "verify", path: "ccb://bundled/verify" }],
+        mentions: [{ name: "README.md", path: "README.md" }],
+      });
+      yield* Fiber.join(completedFiber);
+
+      const input = inputBridge.submitInputs[0];
+      assert.ok(Array.isArray(input));
+      const blocks = input as Array<Record<string, unknown>>;
+      assert.equal(blocks[0]?.type, "text");
+      assert.match(String(blocks[0]?.text), /Use the "plan" agent/);
+      assert.match(String(blocks[0]?.text), /verify \(ccb:\/\/bundled\/verify\)/);
+      assert.match(String(blocks[0]?.text), /README\.md \(README\.md\)/);
+      const image = blocks.find((block) => block.type === "image") as
+        | { source?: { media_type?: string; data?: string } }
+        | undefined;
+      assert.equal(image?.source?.media_type, "image/png");
+      assert.equal(image?.source?.data, Buffer.from("png").toString("base64"));
+    }),
+  );
+});
+
+layer({
+  attachmentsDir: makeTestAttachmentsDir(),
+  bridgeModule: {
+    createDpcodeCcbSession: vi.fn(async () => ({
+      sessionId: "ccb-session-invalid-attachment",
+      async *submitMessage() {
+        yield { type: "result", subtype: "success", is_error: false };
+      },
+      interrupt: vi.fn(),
+      resetAbortController: vi.fn(),
+      getAbortSignal: () => new AbortController().signal,
+      getMessages: () => [],
+      setModel: vi.fn(),
+    })),
+  },
+})("CcbAdapterLive attachment validation", (it) => {
+  it.effect("fails clearly for missing image attachment files", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-invalid-attachment-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      let detail = "";
+      yield* adapter
+        .sendTurn({
+          threadId,
+          input: "inspect this image",
+          attachments: [
+            {
+              type: "image",
+              id: "missing-image",
+              name: "missing.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              detail = error.detail;
+            }),
+          ),
+        );
+
+      assert.match(detail, /Invalid attachment id 'missing-image'/);
+    }),
+  );
+});
+
+const permissionModeBridge = (() => {
+  const modes: string[] = [];
+  return {
+    modes,
+    bridgeModule: {
+      createDpcodeCcbSession: vi.fn(async () => ({
+        sessionId: "ccb-session-permission-mode",
+        async *submitMessage() {
+          yield { type: "result", subtype: "success", is_error: false };
+        },
+        interrupt: vi.fn(),
+        resetAbortController: vi.fn(),
+        getAbortSignal: () => new AbortController().signal,
+        getMessages: () => [],
+        setModel: vi.fn(),
+        setPermissionMode: vi.fn((mode: string) => {
+          modes.push(mode);
+        }),
+      })),
+    },
+  } satisfies CcbAdapterLiveOptions & { modes: string[] };
+})();
+
+layer(permissionModeBridge)("CcbAdapterLive permission mode switching", (it) => {
+  it.effect("maps plan/default interaction modes onto the CCB session permission mode", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-permission-mode-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        providerOptions: { ccb: { permissionMode: "acceptEdits" } },
+      });
+      const firstCompleted = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed" && event.threadId === threadId),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      yield* adapter.sendTurn({
+        threadId,
+        input: "plan it",
+        interactionMode: "plan",
+      });
+      yield* Fiber.join(firstCompleted);
+      const secondCompleted = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed" && event.threadId === threadId),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      yield* adapter.sendTurn({
+        threadId,
+        input: "implement it",
+        interactionMode: "default",
+      });
+      yield* Fiber.join(secondCompleted);
+
+      assert.deepEqual(permissionModeBridge.modes, ["plan", "acceptEdits"]);
     }),
   );
 });
@@ -507,7 +766,7 @@ layer(
           (event) =>
             event.type === "item.completed" &&
             event.payload.itemType === "file_change" &&
-            event.payload.status === "completed",
+            event.payload.status === "failed",
         ),
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
@@ -1151,11 +1410,13 @@ layer(multiTurnBridge)("CcbAdapterLive multi-turn", (it) => {
       yield* Fiber.join(secondCompletedFiber);
 
       assert.equal(multiTurnBridge.createSession.mock.calls.length, 1);
-      assert.equal(multiTurnBridge.submitPrompts[0]?.startsWith("first message\n\nDPCode"), true);
-      assert.equal(multiTurnBridge.submitPrompts[1]?.startsWith("second message\n\nDPCode"), true);
+      const promptText = (prompt: string | ReadonlyArray<unknown> | undefined) =>
+        typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+      assert.match(promptText(multiTurnBridge.submitPrompts[0]), /first message/);
+      assert.match(promptText(multiTurnBridge.submitPrompts[1]), /second message/);
       assert.equal(
         multiTurnBridge.submitPrompts.every((prompt) =>
-          prompt.includes("do not paste full file contents"),
+          promptText(prompt).includes("do not paste full file contents"),
         ),
         true,
       );
@@ -1296,6 +1557,14 @@ layer({
         shortDescription: "Run focused verification",
       },
     ]),
+    listDpcodeCcbAgents: vi.fn(async () => [
+      {
+        name: "review",
+        displayName: "Review",
+        description: "Review changes",
+        model: "sonnet",
+      },
+    ]),
     listDpcodeCcbMcpStatus: vi.fn(async () => ({
       servers: [{ name: "filesystem", transport: "stdio", scope: "project", enabled: true }],
       errors: [],
@@ -1314,6 +1583,8 @@ layer({
         provider: "ccb",
         cwd: process.cwd(),
       });
+      const agents = yield* adapter.listAgents!();
+      const capabilities = yield* adapter.getComposerCapabilities!();
 
       assert.deepEqual(
         commands.commands.map((command) => command.name),
@@ -1322,6 +1593,10 @@ layer({
       assert.equal(skills.skills[0]?.name, "verify");
       assert.equal(skills.skills[0]?.path, "ccb://bundled/verify");
       assert.equal(skills.skills[0]?.interface?.displayName, "Verify");
+      assert.equal(agents.agents[0]?.name, "review");
+      assert.equal(agents.agents[0]?.displayName, "Review");
+      assert.equal(agents.agents[0]?.model, "sonnet");
+      assert.equal(capabilities.supportsSkillDiscovery, true);
     }),
   );
 
@@ -1482,7 +1757,7 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(4),
+        Stream.take(5),
         Stream.runCollect,
         Effect.forkDetach,
       );
@@ -1537,7 +1812,7 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
 });
 
 layer(makePermissionOnlyToolEventFakeBridge())("CcbAdapterLive permission-only tool events", (it) => {
-  it.effect("keeps tool/file rows visible when CCB omits the tool_result message", () =>
+  it.effect("fails tool/file rows when CCB omits the tool_result message", () =>
     Effect.gen(function* () {
       const adapter = yield* CcbAdapter;
       const eventsFiber = yield* adapter.streamEvents.pipe(
@@ -1579,11 +1854,18 @@ layer(makePermissionOnlyToolEventFakeBridge())("CcbAdapterLive permission-only t
           (event) =>
             event.type === "item.completed" &&
             event.payload.itemType === "file_change" &&
-            event.payload.status === "completed" &&
+            event.payload.status === "failed" &&
             event.payload.data.files.includes("index.html"),
         ),
       );
-      assert.ok(events.some((event) => event.type === "turn.completed"));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.payload.state === "failed" &&
+            event.payload.errorMessage.includes("did not emit a tool result"),
+        ),
+      );
     }),
   );
 });
@@ -1759,7 +2041,7 @@ layer(
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(5),
+        Stream.take(4),
         Stream.runCollect,
         Effect.forkDetach,
       );

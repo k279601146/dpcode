@@ -59,6 +59,7 @@ export function useComposerCommandMenuItems(input: {
   canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
   dynamicAgents: readonly { name: string; displayName: string; description?: string }[];
+  useStaticAgentFallback?: boolean;
 }): ComposerCommandItem[] {
   const {
     composerTrigger,
@@ -74,6 +75,7 @@ export function useComposerCommandMenuItems(input: {
     canOfferForkCommand,
     canOfferSideCommand,
     dynamicAgents,
+    useStaticAgentFallback = true,
   } = input;
 
   return useMemo<ComposerCommandItem[]>(() => {
@@ -102,6 +104,10 @@ export function useComposerCommandMenuItems(input: {
               description: displayName,
             }));
         }
+        if (!useStaticAgentFallback) {
+          return [];
+        }
+
         // Static fallback
         return getAgentMentionAutocompleteAliases(provider)
           .filter(({ alias, displayName }) => {
@@ -264,6 +270,7 @@ export function useComposerCommandMenuItems(input: {
     composerTrigger,
     dynamicAgents,
     provider,
+    useStaticAgentFallback,
     providerPlugins,
     providerNativeCommands,
     providerSkills,

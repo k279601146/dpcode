@@ -57,4 +57,13 @@ describe("buildClaudeSubagentPrompt", () => {
     expect(rewritten.prompt).toContain('Use the "explore" agent for this task:');
     expect(rewritten.prompt).toContain("Original user prompt:");
   });
+
+  it("rewrites CCB mentions with the CCB alias table", () => {
+    const rewritten = buildClaudeSubagentPrompt("Please @plan(prepare the implementation)", "ccb");
+
+    expect(rewritten.invocations).toHaveLength(1);
+    expect(rewritten.invocations[0]?.definition.provider).toBe("ccb");
+    expect(rewritten.invocations[0]?.definition.agentName).toBe("plan");
+    expect(rewritten.prompt).toContain('Use the "plan" agent for this task:');
+  });
 });
