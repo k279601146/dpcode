@@ -120,6 +120,7 @@ async function waitForThread(
   predicate: (thread: {
     latestTurn: { turnId: string } | null;
     checkpoints: ReadonlyArray<{
+      turnId: TurnId;
       checkpointTurnCount: number;
       status: "ready" | "missing" | "error";
       assistantMessageId?: MessageId | null;
@@ -133,6 +134,7 @@ async function waitForThread(
   const poll = async (): Promise<{
     latestTurn: { turnId: string } | null;
     checkpoints: ReadonlyArray<{
+      turnId: TurnId;
       checkpointTurnCount: number;
       status: "ready" | "missing" | "error";
       assistantMessageId?: MessageId | null;
@@ -432,6 +434,44 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("uses the previous checkpoint when a provider completion misses the turn-start baseline", async () => {
+    const harness = await createHarness({
+      providerName: "ccb",
+      seedFilesystemCheckpoints: true,
+    });
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const turnId = asTurnId("turn-ccb-fallback-baseline");
+    const turnStartRef = checkpointRefForThreadTurnStart(threadId, turnId);
+
+    expect(gitRefExists(harness.cwd, turnStartRef)).toBe(false);
+
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v4 from ccb\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.makeUnsafe("evt-turn-completed-ccb-fallback"),
+      provider: "ccb",
+      createdAt: new Date().toISOString(),
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    const thread = await waitForThread(
+      harness.engine,
+      (entry) =>
+        entry.checkpoints.some(
+          (checkpoint) =>
+            checkpoint.turnId === turnId &&
+            checkpoint.status === "ready" &&
+            checkpoint.files?.some((file) => file.path === "README.md"),
+        ),
+    );
+    const checkpoint = thread.checkpoints.find((entry) => entry.turnId === turnId);
+
+    expect(checkpoint?.status).toBe("ready");
+    expect(checkpoint?.files?.map((file) => file.path)).toContain("README.md");
   });
 
   it("summarizes only files changed after each turn's start checkpoint", async () => {
@@ -1249,7 +1289,9 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.makeUnsafe("thread-1"),
       numTurns: 1,
     });
-    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "v2\n",
+    );
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.makeUnsafe("thread-1"), 2)),
     ).toBe(false);

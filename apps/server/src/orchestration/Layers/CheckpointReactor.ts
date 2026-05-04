@@ -309,13 +309,38 @@ const make = Effect.gen(function* () {
     // reflects files created or deleted during this turn.
     clearWorkspaceIndexCache(input.cwd);
 
-    const checkpointStatus = fromCheckpointExists ? input.status : ("missing" as const);
+    const fallbackFromCheckpointRef = checkpointRefForThreadTurn(
+      input.threadId,
+      Math.max(0, input.turnCount - 1),
+    );
+    const fallbackFromCheckpointExists = fromCheckpointExists
+      ? false
+      : yield* checkpointStore.hasCheckpointRef({
+          cwd: input.cwd,
+          checkpointRef: fallbackFromCheckpointRef,
+        });
+    const diffFromCheckpointRef = fromCheckpointExists
+      ? fromCheckpointRef
+      : fallbackFromCheckpointExists
+        ? fallbackFromCheckpointRef
+        : undefined;
 
-    const files = fromCheckpointExists
+    if (!fromCheckpointExists && fallbackFromCheckpointExists) {
+      yield* Effect.logWarning("checkpoint capture using previous checkpoint fallback", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        missingCheckpointRef: fromCheckpointRef,
+        fallbackCheckpointRef: fallbackFromCheckpointRef,
+      });
+    }
+
+    const checkpointStatus = diffFromCheckpointRef ? input.status : ("missing" as const);
+
+    const files = diffFromCheckpointRef
       ? yield* checkpointStore
           .diffCheckpoints({
             cwd: input.cwd,
-            fromCheckpointRef,
+            fromCheckpointRef: diffFromCheckpointRef,
             toCheckpointRef: targetCheckpointRef,
             fallbackFromToHead: false,
           })

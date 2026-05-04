@@ -365,6 +365,13 @@ function filePathFromToolInput(input: Record<string, unknown>): string | undefin
     input.path,
     input.filename,
     input.notebook_path,
+    input.notebookPath,
+    input.target_file,
+    input.targetFile,
+    input.new_file_path,
+    input.newFilePath,
+    input.old_file_path,
+    input.oldFilePath,
   );
 }
 
@@ -380,9 +387,103 @@ function filesFromToolInput(input: Record<string, unknown>): ReadonlyArray<strin
   return Array.from(new Set(candidates.filter((value): value is string => value !== undefined)));
 }
 
-function normalizeCcbToolResult(result: unknown): unknown {
+function isCcbFileDisplayTool(itemType: CanonicalItemType, toolName: string): boolean {
+  return itemType === "file_change" || isCcbReadOnlyToolName(toolName);
+}
+
+function ccbFileOperation(toolName: string): string | undefined {
+  const normalized = toolName.toLowerCase();
+  if (normalized.includes("delete") || normalized.includes("remove")) return "delete";
+  if (normalized === "write" || normalized.includes("create")) return "write";
+  if (
+    normalized === "edit" ||
+    normalized === "multiedit" ||
+    normalized === "notebookedit" ||
+    normalized.includes("patch") ||
+    normalized.includes("replace")
+  ) {
+    return "edit";
+  }
+  if (isCcbReadOnlyToolName(toolName)) return "read";
+  return undefined;
+}
+
+function parsedToolResultContent(result: unknown): unknown {
+  const record = asObject(result);
+  const content = record?.content;
+  if (typeof content !== "string") return content;
+  return tryParseJsonRecord(content) ?? content;
+}
+
+function textLengthFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "string") return value.length;
+  if (Array.isArray(value)) {
+    const length = value.reduce((total, entry) => total + (textLengthFromUnknown(entry) ?? 0), 0);
+    return length > 0 ? length : undefined;
+  }
+  const record = asObject(value);
+  if (!record) return undefined;
+  return (
+    textLengthFromUnknown(record.content) ??
+    textLengthFromUnknown(record.text) ??
+    textLengthFromUnknown(record.output) ??
+    textLengthFromUnknown(record.result)
+  );
+}
+
+function ccbDisplayInput(
+  itemType: CanonicalItemType,
+  toolName: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isCcbFileDisplayTool(itemType, toolName)) {
+    return input;
+  }
+
+  const filePath = filePathFromToolInput(input);
+  const files = filesFromToolInput(input);
+  const operation = ccbFileOperation(toolName);
+  const contentLength =
+    textLengthFromUnknown(input.content) ??
+    textLengthFromUnknown(input.contents) ??
+    textLengthFromUnknown(input.text);
+  const oldStringLength = textLengthFromUnknown(input.old_string) ?? textLengthFromUnknown(input.oldString);
+  const newStringLength = textLengthFromUnknown(input.new_string) ?? textLengthFromUnknown(input.newString);
+  const editCount = Array.isArray(input.edits) ? input.edits.length : undefined;
+  const pattern = firstToolString(input.pattern, input.query, input.glob);
+
+  return {
+    ...(operation ? { operation } : {}),
+    ...(filePath ? { filePath } : {}),
+    ...(files.length > 0 ? { files } : {}),
+    ...(pattern ? { pattern } : {}),
+    ...(contentLength !== undefined ? { contentLength } : {}),
+    ...(oldStringLength !== undefined ? { oldStringLength } : {}),
+    ...(newStringLength !== undefined ? { newStringLength } : {}),
+    ...(editCount !== undefined ? { editCount } : {}),
+  };
+}
+
+function normalizeCcbToolResult(
+  itemType: CanonicalItemType,
+  toolName: string,
+  result: unknown,
+): unknown {
   const record = asObject(result);
   if (!record) return result;
+  if (isCcbFileDisplayTool(itemType, toolName)) {
+    const content = parsedToolResultContent(result);
+    const contentRecord = asObject(content);
+    const filePath = contentRecord ? filePathFromToolInput(contentRecord) : undefined;
+    const files = contentRecord ? filesFromToolInput(contentRecord) : [];
+    const contentLength = textLengthFromUnknown(content);
+    return {
+      ...(typeof record.is_error === "boolean" ? { isError: record.is_error } : {}),
+      ...(filePath ? { filePath } : {}),
+      ...(files.length > 0 ? { files } : {}),
+      ...(contentLength !== undefined ? { outputLength: contentLength } : {}),
+    };
+  }
   if (record.content !== undefined && Object.keys(record).length === 1) {
     return record.content;
   }
@@ -431,6 +532,7 @@ function ccbToolResultStreamKind(
 }
 
 function ccbToolData(
+  itemType: CanonicalItemType,
   toolName: string,
   input: Record<string, unknown>,
   result?: unknown,
@@ -438,13 +540,15 @@ function ccbToolData(
   const command = commandFromToolInput(input);
   const filePath = filePathFromToolInput(input);
   const files = filesFromToolInput(input);
+  const operation = ccbFileOperation(toolName);
   return {
     toolName,
-    input,
+    input: ccbDisplayInput(itemType, toolName, input),
+    ...(operation ? { operation } : {}),
     ...(command ? { command } : {}),
     ...(filePath ? { filePath } : {}),
     ...(files.length > 0 ? { files } : {}),
-    ...(result !== undefined ? { result: normalizeCcbToolResult(result) } : {}),
+    ...(result !== undefined ? { result: normalizeCcbToolResult(itemType, toolName, result) } : {}),
   };
 }
 
@@ -638,10 +742,15 @@ function modelFromInput(input: ProviderSendTurnInput): string | undefined {
 }
 
 function buildPromptText(input: ProviderSendTurnInput): string {
-  return withProviderPlanModePrompt({
+  const prompt = withProviderPlanModePrompt({
     text: input.input?.trim() ?? "",
     interactionMode: input.interactionMode,
   });
+  return [
+    prompt,
+    "",
+    "DPCode shows file changes in separate UI cards. When you create, edit, or delete files, do not paste full file contents in the chat response unless the user explicitly asks for the contents. Mention the changed paths and summarize the result instead.",
+  ].join("\n");
 }
 
 function normalizeCcbOpenAiBaseUrl(value: string | undefined): string | undefined {
@@ -1160,7 +1269,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             status,
             title: tool.title,
             ...(tool.detail ? { detail: tool.detail } : {}),
-            data: ccbToolData(tool.toolName, tool.input, result),
+            data: ccbToolData(tool.itemType, tool.toolName, tool.input, result),
           },
           raw,
           providerRefs: {
@@ -1462,7 +1571,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 block,
               );
               const streamKind = ccbToolResultStreamKind(tool.itemType);
-              if (streamKind && resultText.length > 0) {
+              if (
+                streamKind &&
+                resultText.length > 0 &&
+                !isCcbFileDisplayTool(tool.itemType, tool.toolName)
+              ) {
                 yield* emitContentDelta(context, turnId, streamKind, resultText, raw, itemId);
               }
               yield* emitToolLifecycle(
@@ -2067,7 +2180,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                           status: "inProgress",
                           title: toolItem.title,
                           ...(detail ? { detail } : {}),
-                          data: ccbToolData(toolName, inputObject),
+                          data: ccbToolData(itemType, toolName, inputObject),
                         },
                         raw,
                         providerRefs: {
@@ -2088,7 +2201,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                         status: "inProgress",
                         title: toolItem.title,
                         ...(detail ? { detail } : {}),
-                        data: ccbToolData(toolName, inputObject),
+                        data: ccbToolData(itemType, toolName, inputObject),
                       },
                       raw,
                       providerRefs: {

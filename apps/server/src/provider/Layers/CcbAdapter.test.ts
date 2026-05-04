@@ -491,7 +491,15 @@ layer(
             event.type === "item.started" &&
             event.payload.itemType === "file_change" &&
             event.payload.title === "File change" &&
-            (event.payload.data as { files?: string[] }).files?.includes("src/app.ts"),
+            (event.payload.data as { files?: string[]; input?: unknown }).files?.includes(
+              "src/app.ts",
+            ) &&
+            (event.payload.data as { input?: { oldStringLength?: number; newStringLength?: number } })
+              .input?.oldStringLength === 3 &&
+            (event.payload.data as { input?: { oldStringLength?: number; newStringLength?: number } })
+              .input?.newStringLength === 3 &&
+            JSON.stringify(event.payload.data).includes("old_string") === false &&
+            JSON.stringify(event.payload.data).includes("new_string") === false,
         ),
       );
       assert.ok(
@@ -645,7 +653,7 @@ layer(
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(8),
+        Stream.take(7),
         Stream.runCollect,
         Effect.forkDetach,
       );
@@ -685,7 +693,8 @@ layer(
           (event) =>
             event.type === "item.updated" &&
             event.payload.itemType === "file_change" &&
-            (event.payload.data as { files?: string[] }).files?.[0] === "index.html",
+            (event.payload.data as { files?: string[] }).files?.[0] === "index.html" &&
+            JSON.stringify(event.payload.data).includes("<!DOCTYPE html>") === false,
         ),
       );
       assert.ok(
@@ -693,16 +702,16 @@ layer(
           (event) =>
             event.type === "item.completed" &&
             event.payload.itemType === "file_change" &&
-            (event.payload.data as { toolName?: string }).toolName === "Write",
+            (event.payload.data as { toolName?: string; operation?: string }).toolName === "Write" &&
+            (event.payload.data as { operation?: string }).operation === "write" &&
+            JSON.stringify(event.payload.data).includes("<!DOCTYPE html>") === false,
         ),
       );
-      assert.ok(
+      assert.equal(
         events.some(
-          (event) =>
-            event.type === "content.delta" &&
-            event.payload.streamKind === "file_change_output" &&
-            event.payload.delta.includes("file_path"),
+          (event) => event.type === "content.delta" && event.payload.streamKind === "file_change_output",
         ),
+        false,
       );
       assert.ok(events.some((event) => event.type === "turn.completed"));
     }),
@@ -1142,7 +1151,14 @@ layer(multiTurnBridge)("CcbAdapterLive multi-turn", (it) => {
       yield* Fiber.join(secondCompletedFiber);
 
       assert.equal(multiTurnBridge.createSession.mock.calls.length, 1);
-      assert.deepEqual(multiTurnBridge.submitPrompts, ["first message", "second message"]);
+      assert.equal(multiTurnBridge.submitPrompts[0]?.startsWith("first message\n\nDPCode"), true);
+      assert.equal(multiTurnBridge.submitPrompts[1]?.startsWith("second message\n\nDPCode"), true);
+      assert.equal(
+        multiTurnBridge.submitPrompts.every((prompt) =>
+          prompt.includes("do not paste full file contents"),
+        ),
+        true,
+      );
       assert.equal((yield* adapter.listSessions())[0]?.provider, "ccb");
     }),
   );
@@ -1466,7 +1482,7 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
             event.type === "item.completed" ||
             event.type === "turn.completed",
         ),
-        Stream.take(6),
+        Stream.take(4),
         Stream.runCollect,
         Effect.forkDetach,
       );
@@ -1501,13 +1517,11 @@ layer(makePermissionToolEventFakeBridge())("CcbAdapterLive permission tool event
             event.payload.status === "inProgress",
         ),
       );
-      assert.ok(
+      assert.equal(
         events.some(
-          (event) =>
-            event.type === "content.delta" &&
-            event.payload.streamKind === "file_change_output" &&
-            event.payload.delta === "created index.html",
+          (event) => event.type === "content.delta" && event.payload.streamKind === "file_change_output",
         ),
+        false,
       );
       assert.ok(
         events.some(
