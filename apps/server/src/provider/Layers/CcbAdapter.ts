@@ -50,7 +50,7 @@ import {
 } from "../Errors.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v6";
+const CCB_BRIDGE_CACHE_VERSION = "v7";
 const SUPPORTED_CCB_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -77,6 +77,41 @@ const CCB_BRIDGE_MACRO_DEFINES: Readonly<Record<string, string>> = {
   "MACRO.PACKAGE_URL": JSON.stringify(""),
   "MACRO.VERSION_CHANGELOG": JSON.stringify(""),
 };
+const CCB_BRIDGE_FEATURES = [
+  "BUDDY",
+  "TRANSCRIPT_CLASSIFIER",
+  "BRIDGE_MODE",
+  "AGENT_TRIGGERS_REMOTE",
+  "CHICAGO_MCP",
+  "VOICE_MODE",
+  "SHOT_STATS",
+  "PROMPT_CACHE_BREAK_DETECTION",
+  "TOKEN_BUDGET",
+  "AGENT_TRIGGERS",
+  "ULTRATHINK",
+  "BUILTIN_EXPLORE_PLAN_AGENTS",
+  "LODESTONE",
+  "EXTRACT_MEMORIES",
+  "VERIFICATION_AGENT",
+  "KAIROS_BRIEF",
+  "AWAY_SUMMARY",
+  "ULTRAPLAN",
+  "DAEMON",
+  "ACP",
+  "WORKFLOW_SCRIPTS",
+  "HISTORY_SNIP",
+  "MONITOR_TOOL",
+  "KAIROS",
+  "BG_SESSIONS",
+  "TEMPLATES",
+  "CONNECTOR_TEXT",
+  "COMMIT_ATTRIBUTION",
+  "DIRECT_CONNECT",
+  "POOR",
+  "SSH_REMOTE",
+  "FORK_SUBAGENT",
+  "EXPERIMENTAL_SKILL_SEARCH",
+] as const;
 const DEFAULT_CCB_VENDOR_PATH = resolveCcbVendorPath({
   baseDir: dirname(fileURLToPath(import.meta.url)),
 });
@@ -89,8 +124,17 @@ type CcbBridgeModule = {
     permissionMode?: string;
     openAiBaseUrl?: string;
     openAiApiKey?: string;
+    languagePreference?: string;
+    customSystemPrompt?: string;
     initialMessages?: unknown[];
     appendSystemPrompt?: string;
+    settingsJson?: string;
+    featureOptions?: {
+      enableSkillSearch?: boolean;
+      enableForkSubagents?: boolean;
+      enableAgentSwarms?: boolean;
+      enableWorktreeTools?: boolean;
+    };
     canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
   }): Promise<CcbSessionHandle>;
   listDpcodeCcbCommands?(cwd: string): Promise<ReadonlyArray<{ name: string; description?: string }>>;
@@ -804,6 +848,52 @@ function buildPromptText(input: ProviderSendTurnInput): string {
     .join("\n");
 }
 
+function buildCcbDpcodeSystemPrompt(input: {
+  readonly languagePreference?: string;
+  readonly userAppendSystemPrompt?: string;
+  readonly enableWindowsCommandGuidance?: boolean;
+  readonly preferAgentTools?: boolean;
+}): string | undefined {
+  const sections: string[] = [];
+  const languagePreference = input.languagePreference?.trim();
+  if (languagePreference) {
+    sections.push(
+      [
+        "# DP Code language policy",
+        `Always respond in ${languagePreference}. Use ${languagePreference} for user-facing explanations and final answers unless the user explicitly asks for another language.`,
+      ].join("\n"),
+    );
+  }
+
+  if (input.enableWindowsCommandGuidance !== false) {
+    sections.push(
+      [
+        "# DP Code Windows command policy",
+        "This DP Code session is running on Windows. Prefer PowerShell-compatible commands and tools by default.",
+        "Use commands such as Get-ChildItem, Select-String, Get-Content, Test-Path, Resolve-Path, New-Item, Remove-Item, Move-Item, and Copy-Item.",
+        "Do not default to Unix-only commands such as ls -R, grep, cat, sed, awk, chmod, or rm unless you have verified they are available and appropriate.",
+      ].join("\n"),
+    );
+  }
+
+  if (input.preferAgentTools !== false) {
+    sections.push(
+      [
+        "# DP Code CCB agent and skill policy",
+        "For broad project analysis, multi-file investigation, planning, review, or parallelizable work, actively use CCB Agent, Skill, Task, Explore, Plan, Swarm, or Worktree tools when they are available and relevant.",
+        "If an Agent or Skill tool is available, prefer delegating bounded exploration or planning work instead of doing every repository scan in one long shell command.",
+      ].join("\n"),
+    );
+  }
+
+  const userAppendSystemPrompt = input.userAppendSystemPrompt?.trim();
+  if (userAppendSystemPrompt) {
+    sections.push(userAppendSystemPrompt);
+  }
+
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
+}
+
 type CcbQueryInput = string | ReadonlyArray<Record<string, unknown>>;
 
 function buildCcbImageContentBlock(input: {
@@ -963,6 +1053,9 @@ function ccbBridgeFreshnessInputs(vendorPath: string): ReadonlyArray<string> {
   return [
     ccbBridgeEntryPath(vendorPath),
     resolve(vendorPath, "src/QueryEngine.ts"),
+    resolve(vendorPath, "src/utils/ripgrep.ts"),
+    resolve(vendorPath, "src/utils/vendor/ripgrep/x64-win32/rg.exe"),
+    resolve(vendorPath, "scripts/defines.ts"),
     resolve(vendorPath, "package.json"),
     resolve(vendorPath, "bun.lock"),
   ];
@@ -987,11 +1080,16 @@ async function isCcbBridgeBundleFresh(
 }
 
 async function runDefaultCcbBridgeBuild(input: CcbBridgeBuildInput): Promise<void> {
+  const envFeatures = Object.keys(process.env)
+    .filter((key) => key.startsWith("FEATURE_"))
+    .map((key) => key.slice("FEATURE_".length));
+  const features = Array.from(new Set([...CCB_BRIDGE_FEATURES, ...envFeatures]));
   const args = [
     "build",
     input.entryPath,
     "--target=node",
     "--format=esm",
+    ...features.map((feature) => `--feature=${feature}`),
     ...Object.entries(CCB_BRIDGE_MACRO_DEFINES).flatMap(([key, value]) => [
       "--define",
       `${key}=${value}`,
@@ -1002,7 +1100,7 @@ async function runDefaultCcbBridgeBuild(input: CcbBridgeBuildInput): Promise<voi
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn("bun", args, {
       cwd: input.vendorPath,
-      shell: process.platform === "win32",
+      shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
@@ -1031,6 +1129,29 @@ async function runDefaultCcbBridgeBuild(input: CcbBridgeBuildInput): Promise<voi
   });
 }
 
+function ccbBridgeRipgrepSourcePath(vendorPath: string): string {
+  return resolve(vendorPath, "src/utils/vendor/ripgrep");
+}
+
+function ccbBridgeRipgrepTargetPath(outputPath: string): string {
+  return resolve(dirname(outputPath), "vendor/ripgrep");
+}
+
+async function ensureCcbBridgeVendorAssets(input: {
+  readonly vendorPath: string;
+  readonly outputPath: string;
+}): Promise<void> {
+  if (!existsSync(ccbBridgeRipgrepSourcePath(input.vendorPath))) {
+    return;
+  }
+
+  await cp(ccbBridgeRipgrepSourcePath(input.vendorPath), ccbBridgeRipgrepTargetPath(input.outputPath), {
+    recursive: true,
+    force: true,
+    preserveTimestamps: true,
+  });
+}
+
 async function resolveCcbBridgeModuleUrl(
   input: {
     readonly vendorPath: string;
@@ -1054,6 +1175,11 @@ async function resolveCcbBridgeModuleUrl(
       outputPath,
     });
   }
+
+  await ensureCcbBridgeVendorAssets({
+    vendorPath: input.vendorPath,
+    outputPath,
+  });
 
   const outputStat = await stat(outputPath);
   const outputUrl = pathToFileURL(outputPath);
@@ -2312,6 +2438,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const pendingApprovals = new Map<string, PendingApproval>();
         const runtimeMode = input.runtimeMode;
         const resumeCursor = asCcbResumeCursor(input.resumeCursor);
+        const ccbOptions = input.providerOptions?.ccb;
+        const appendSystemPrompt = buildCcbDpcodeSystemPrompt({
+          languagePreference: ccbOptions?.languagePreference,
+          userAppendSystemPrompt: ccbOptions?.appendSystemPrompt,
+          enableWindowsCommandGuidance: ccbOptions?.enableWindowsCommandGuidance,
+          preferAgentTools: ccbOptions?.preferAgentTools,
+        });
         let contextRef: CcbSessionContext | undefined;
         const initialMessages = yield* Effect.tryPromise({
           try: () => readCcbTranscript(resumeCursor?.transcriptPath),
@@ -2341,6 +2474,28 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               ...(input.providerOptions?.ccb?.openAiApiKey
                 ? { openAiApiKey: input.providerOptions.ccb.openAiApiKey }
                 : {}),
+              ...(ccbOptions?.languagePreference
+                ? { languagePreference: ccbOptions.languagePreference }
+                : {}),
+              ...(ccbOptions?.customSystemPrompt
+                ? { customSystemPrompt: ccbOptions.customSystemPrompt }
+                : {}),
+              ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
+              ...(ccbOptions?.settingsJson ? { settingsJson: ccbOptions.settingsJson } : {}),
+              featureOptions: {
+                ...(ccbOptions?.enableSkillSearch !== undefined
+                  ? { enableSkillSearch: ccbOptions.enableSkillSearch }
+                  : {}),
+                ...(ccbOptions?.enableForkSubagents !== undefined
+                  ? { enableForkSubagents: ccbOptions.enableForkSubagents }
+                  : {}),
+                ...(ccbOptions?.enableAgentSwarms !== undefined
+                  ? { enableAgentSwarms: ccbOptions.enableAgentSwarms }
+                  : {}),
+                ...(ccbOptions?.enableWorktreeTools !== undefined
+                  ? { enableWorktreeTools: ccbOptions.enableWorktreeTools }
+                  : {}),
+              },
               ...(initialMessages ? { initialMessages } : {}),
               canUseTool: async (...args: ReadonlyArray<unknown>) => {
                 const [tool, toolInput, , , toolUseId] = args;

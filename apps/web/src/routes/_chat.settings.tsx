@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
+import { Textarea } from "../components/ui/textarea";
 import { toastManager } from "../components/ui/toast";
 import { ThemePackEditor } from "../components/ThemePackEditor";
 import { SidebarHeaderTrigger, SidebarInset } from "../components/ui/sidebar";
@@ -441,6 +442,17 @@ function SettingsRouteView() {
   const isCcbApiSettingsDirty =
     settings.ccbOpenAiBaseUrl !== defaults.ccbOpenAiBaseUrl ||
     settings.ccbOpenAiApiKey !== defaults.ccbOpenAiApiKey;
+  const isCcbRuntimeSettingsDirty =
+    settings.ccbLanguagePreference !== defaults.ccbLanguagePreference ||
+    settings.ccbAppendSystemPrompt !== defaults.ccbAppendSystemPrompt ||
+    settings.ccbCustomSystemPrompt !== defaults.ccbCustomSystemPrompt ||
+    settings.ccbSettingsJson !== defaults.ccbSettingsJson ||
+    settings.ccbEnableWindowsCommandGuidance !== defaults.ccbEnableWindowsCommandGuidance ||
+    settings.ccbPreferAgentTools !== defaults.ccbPreferAgentTools ||
+    settings.ccbEnableSkillSearch !== defaults.ccbEnableSkillSearch ||
+    settings.ccbEnableForkSubagents !== defaults.ccbEnableForkSubagents ||
+    settings.ccbEnableAgentSwarms !== defaults.ccbEnableAgentSwarms ||
+    settings.ccbEnableWorktreeTools !== defaults.ccbEnableWorktreeTools;
 
   const changedSettingLabels = [
     ...(theme !== "system" ? ["Theme"] : []),
@@ -491,6 +503,7 @@ function SettingsRouteView() {
       ? ["Custom models"]
       : []),
     ...(isCcbApiSettingsDirty ? ["CCB API"] : []),
+    ...(isCcbRuntimeSettingsDirty ? ["CCB runtime"] : []),
     ...(isInstallSettingsDirty ? ["Provider installs"] : []),
   ];
 
@@ -2075,6 +2088,206 @@ function SettingsRouteView() {
                   placeholder="your-api-key-1"
                   spellCheck={false}
                 />
+              </label>
+            </div>
+          </SettingsRow>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="CCB runtime">
+        <div className="space-y-2">
+          <SettingsRow
+            title="Language and prompt injection"
+            description="Inject DP Code-specific CCB guidance for language, Windows commands, agents, and user prompt extensions."
+            resetAction={
+              isCcbRuntimeSettingsDirty ? (
+                <SettingResetButton
+                  label="CCB runtime"
+                  onClick={() =>
+                    updateSettings({
+                      ccbLanguagePreference: defaults.ccbLanguagePreference,
+                      ccbAppendSystemPrompt: defaults.ccbAppendSystemPrompt,
+                      ccbCustomSystemPrompt: defaults.ccbCustomSystemPrompt,
+                      ccbSettingsJson: defaults.ccbSettingsJson,
+                      ccbEnableWindowsCommandGuidance: defaults.ccbEnableWindowsCommandGuidance,
+                      ccbPreferAgentTools: defaults.ccbPreferAgentTools,
+                      ccbEnableSkillSearch: defaults.ccbEnableSkillSearch,
+                      ccbEnableForkSubagents: defaults.ccbEnableForkSubagents,
+                      ccbEnableAgentSwarms: defaults.ccbEnableAgentSwarms,
+                      ccbEnableWorktreeTools: defaults.ccbEnableWorktreeTools,
+                    })
+                  }
+                />
+              ) : null
+            }
+          >
+            <div className="mt-4 space-y-4 border-t border-border/70 pt-4">
+              <label htmlFor="ccb-language-preference" className="block">
+                <span className="block text-xs font-medium text-foreground">Language preference</span>
+                <Input
+                  id="ccb-language-preference"
+                  className="mt-1"
+                  value={settings.ccbLanguagePreference}
+                  onChange={(event) =>
+                    updateSettings({ ccbLanguagePreference: event.target.value })
+                  }
+                  placeholder="Chinese"
+                  spellCheck={false}
+                />
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Used to keep CCB replies in the user's preferred language.
+                </span>
+              </label>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">
+                      Windows command guidance
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      Prefer PowerShell-safe commands.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbEnableWindowsCommandGuidance}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbEnableWindowsCommandGuidance: Boolean(checked) })
+                    }
+                    aria-label="Enable CCB Windows command guidance"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">
+                      Prefer Agent and Skill tools
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      Encourage Explore, Plan, Task, Skill, and Swarm usage.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbPreferAgentTools}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbPreferAgentTools: Boolean(checked) })
+                    }
+                    aria-label="Prefer CCB Agent and Skill tools"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">Skill search</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Runtime-enable CCB skill discovery.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbEnableSkillSearch}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbEnableSkillSearch: Boolean(checked) })
+                    }
+                    aria-label="Enable CCB skill search"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">Fork subagents</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Expose compiled fork-subagent paths when CCB allows them.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbEnableForkSubagents}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbEnableForkSubagents: Boolean(checked) })
+                    }
+                    aria-label="Enable CCB fork subagents"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">Agent swarms</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Keep CCB team/swarm tools available.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbEnableAgentSwarms}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbEnableAgentSwarms: Boolean(checked) })
+                    }
+                    aria-label="Enable CCB agent swarms"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                  <span>
+                    <span className="block text-xs font-medium text-foreground">Worktree tools</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Keep CCB worktree-oriented tools enabled.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={settings.ccbEnableWorktreeTools}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ ccbEnableWorktreeTools: Boolean(checked) })
+                    }
+                    aria-label="Enable CCB worktree tools"
+                  />
+                </label>
+              </div>
+
+              <label htmlFor="ccb-append-system-prompt" className="block">
+                <span className="block text-xs font-medium text-foreground">
+                  Append system prompt
+                </span>
+                <Textarea
+                  id="ccb-append-system-prompt"
+                  className="mt-1"
+                  value={settings.ccbAppendSystemPrompt}
+                  onChange={(event) =>
+                    updateSettings({ ccbAppendSystemPrompt: event.target.value })
+                  }
+                  placeholder="Additional CCB instructions appended after DP Code guidance."
+                  spellCheck={false}
+                />
+              </label>
+
+              <label htmlFor="ccb-custom-system-prompt" className="block">
+                <span className="block text-xs font-medium text-foreground">
+                  Custom system prompt override
+                </span>
+                <Textarea
+                  id="ccb-custom-system-prompt"
+                  className="mt-1"
+                  value={settings.ccbCustomSystemPrompt}
+                  onChange={(event) =>
+                    updateSettings({ ccbCustomSystemPrompt: event.target.value })
+                  }
+                  placeholder="Optional full CCB system prompt override. Leave blank to keep CCB defaults."
+                  spellCheck={false}
+                />
+              </label>
+
+              <label htmlFor="ccb-settings-json" className="block">
+                <span className="block text-xs font-medium text-foreground">
+                  Raw CCB settings JSON
+                </span>
+                <Textarea
+                  id="ccb-settings-json"
+                  className="mt-1 font-mono"
+                  value={settings.ccbSettingsJson}
+                  onChange={(event) => updateSettings({ ccbSettingsJson: event.target.value })}
+                  placeholder={'{ "env": { "SKILL_SEARCH_ENABLED": "1" } }'}
+                  spellCheck={false}
+                />
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Currently supports an <code>env</code> object for advanced CCB runtime variables.
+                </span>
               </label>
             </div>
           </SettingsRow>

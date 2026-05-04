@@ -254,6 +254,18 @@ describe("getProviderStartOptions", () => {
   it("returns only populated provider overrides", () => {
     expect(
       getProviderStartOptions({
+        ccbAppendSystemPrompt: "",
+        ccbCustomSystemPrompt: "",
+        ccbEnableAgentSwarms: true,
+        ccbEnableForkSubagents: false,
+        ccbEnableSkillSearch: false,
+        ccbEnableWindowsCommandGuidance: true,
+        ccbEnableWorktreeTools: true,
+        ccbLanguagePreference: "",
+        ccbOpenAiApiKey: "",
+        ccbOpenAiBaseUrl: "",
+        ccbPreferAgentTools: true,
+        ccbSettingsJson: "",
         claudeBinaryPath: "/usr/local/bin/claude",
         codexBinaryPath: "",
         codexHomePath: "/Users/you/.codex",
@@ -278,6 +290,18 @@ describe("getProviderStartOptions", () => {
   it("returns undefined when no provider overrides are configured", () => {
     expect(
       getProviderStartOptions({
+        ccbAppendSystemPrompt: "",
+        ccbCustomSystemPrompt: "",
+        ccbEnableAgentSwarms: true,
+        ccbEnableForkSubagents: false,
+        ccbEnableSkillSearch: false,
+        ccbEnableWindowsCommandGuidance: true,
+        ccbEnableWorktreeTools: true,
+        ccbLanguagePreference: "",
+        ccbOpenAiApiKey: "",
+        ccbOpenAiBaseUrl: "",
+        ccbPreferAgentTools: true,
+        ccbSettingsJson: "",
         claudeBinaryPath: "",
         codexBinaryPath: "",
         codexHomePath: "",
@@ -287,6 +311,44 @@ describe("getProviderStartOptions", () => {
         openCodeServerUrl: "",
       }),
     ).toBeUndefined();
+  });
+
+  it("passes CCB runtime settings through provider options", () => {
+    expect(
+      getProviderStartOptions({
+        ccbAppendSystemPrompt: "Use agents",
+        ccbCustomSystemPrompt: "",
+        ccbEnableAgentSwarms: true,
+        ccbEnableForkSubagents: true,
+        ccbEnableSkillSearch: true,
+        ccbEnableWindowsCommandGuidance: true,
+        ccbEnableWorktreeTools: true,
+        ccbLanguagePreference: "Chinese",
+        ccbOpenAiApiKey: "",
+        ccbOpenAiBaseUrl: "",
+        ccbPreferAgentTools: true,
+        ccbSettingsJson: '{ "env": { "SKILL_SEARCH_ENABLED": "1" } }',
+        claudeBinaryPath: "",
+        codexBinaryPath: "",
+        codexHomePath: "",
+        geminiBinaryPath: "",
+        openCodeBinaryPath: "",
+        openCodeServerPassword: "",
+        openCodeServerUrl: "",
+      }),
+    ).toEqual({
+      ccb: {
+        appendSystemPrompt: "Use agents",
+        enableAgentSwarms: true,
+        enableForkSubagents: true,
+        enableSkillSearch: true,
+        enableWindowsCommandGuidance: true,
+        enableWorktreeTools: true,
+        languagePreference: "Chinese",
+        preferAgentTools: true,
+        settingsJson: '{ "env": { "SKILL_SEARCH_ENABLED": "1" } }',
+      },
+    });
   });
 });
 

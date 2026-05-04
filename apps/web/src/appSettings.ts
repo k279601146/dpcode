@@ -79,6 +79,22 @@ export const AppSettingsSchema = Schema.Struct({
   ccbOpenAiApiKey: Schema.String.check(Schema.isMaxLength(4096)).pipe(
     withDefaults(() => "your-api-key-1"),
   ),
+  ccbLanguagePreference: Schema.String.check(Schema.isMaxLength(256)).pipe(
+    withDefaults(() => "Chinese"),
+  ),
+  ccbAppendSystemPrompt: Schema.String.check(Schema.isMaxLength(16000)).pipe(
+    withDefaults(() => ""),
+  ),
+  ccbCustomSystemPrompt: Schema.String.check(Schema.isMaxLength(16000)).pipe(
+    withDefaults(() => ""),
+  ),
+  ccbSettingsJson: Schema.String.check(Schema.isMaxLength(16000)).pipe(withDefaults(() => "")),
+  ccbEnableWindowsCommandGuidance: Schema.Boolean.pipe(withDefaults(() => true)),
+  ccbPreferAgentTools: Schema.Boolean.pipe(withDefaults(() => true)),
+  ccbEnableSkillSearch: Schema.Boolean.pipe(withDefaults(() => false)),
+  ccbEnableForkSubagents: Schema.Boolean.pipe(withDefaults(() => false)),
+  ccbEnableAgentSwarms: Schema.Boolean.pipe(withDefaults(() => true)),
+  ccbEnableWorktreeTools: Schema.Boolean.pipe(withDefaults(() => true)),
   claudeBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   chatFontSizePx: Schema.Number.pipe(withDefaults(() => DEFAULT_CHAT_FONT_SIZE_PX)),
   chatCodeFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(withDefaults(() => "")),
@@ -217,6 +233,10 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     ccbOpenAiBaseUrl:
       settings.ccbOpenAiBaseUrl.trim() || DEFAULT_APP_SETTINGS.ccbOpenAiBaseUrl,
     ccbOpenAiApiKey: settings.ccbOpenAiApiKey.trim() || DEFAULT_APP_SETTINGS.ccbOpenAiApiKey,
+    ccbLanguagePreference: settings.ccbLanguagePreference.trim(),
+    ccbAppendSystemPrompt: settings.ccbAppendSystemPrompt.trim(),
+    ccbCustomSystemPrompt: settings.ccbCustomSystemPrompt.trim(),
+    ccbSettingsJson: settings.ccbSettingsJson.trim(),
     chatFontSizePx: normalizeChatFontSizePx(settings.chatFontSizePx),
     customCcbModels: normalizeCustomModelSlugs(settings.customCcbModels, "ccb"),
     customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels, "codex"),
@@ -368,6 +388,16 @@ export function getProviderStartOptions(
     AppSettings,
     | "ccbOpenAiApiKey"
     | "ccbOpenAiBaseUrl"
+    | "ccbLanguagePreference"
+    | "ccbAppendSystemPrompt"
+    | "ccbCustomSystemPrompt"
+    | "ccbSettingsJson"
+    | "ccbEnableWindowsCommandGuidance"
+    | "ccbPreferAgentTools"
+    | "ccbEnableSkillSearch"
+    | "ccbEnableForkSubagents"
+    | "ccbEnableAgentSwarms"
+    | "ccbEnableWorktreeTools"
     | "claudeBinaryPath"
     | "codexBinaryPath"
     | "codexHomePath"
@@ -377,12 +407,52 @@ export function getProviderStartOptions(
     | "openCodeServerUrl"
   >,
 ): ProviderStartOptions | undefined {
+  const ccbLanguagePreference = settings.ccbLanguagePreference?.trim() ?? "";
+  const ccbAppendSystemPrompt = settings.ccbAppendSystemPrompt?.trim() ?? "";
+  const ccbCustomSystemPrompt = settings.ccbCustomSystemPrompt?.trim() ?? "";
+  const ccbSettingsJson = settings.ccbSettingsJson?.trim() ?? "";
+  const ccbEnableWindowsCommandGuidance =
+    settings.ccbEnableWindowsCommandGuidance ??
+    DEFAULT_APP_SETTINGS.ccbEnableWindowsCommandGuidance;
+  const ccbPreferAgentTools =
+    settings.ccbPreferAgentTools ?? DEFAULT_APP_SETTINGS.ccbPreferAgentTools;
+  const ccbEnableSkillSearch =
+    settings.ccbEnableSkillSearch ?? DEFAULT_APP_SETTINGS.ccbEnableSkillSearch;
+  const ccbEnableForkSubagents =
+    settings.ccbEnableForkSubagents ?? DEFAULT_APP_SETTINGS.ccbEnableForkSubagents;
+  const ccbEnableAgentSwarms =
+    settings.ccbEnableAgentSwarms ?? DEFAULT_APP_SETTINGS.ccbEnableAgentSwarms;
+  const ccbEnableWorktreeTools =
+    settings.ccbEnableWorktreeTools ?? DEFAULT_APP_SETTINGS.ccbEnableWorktreeTools;
+  const hasCcbOptions =
+    Boolean(settings.ccbOpenAiBaseUrl) ||
+    Boolean(settings.ccbOpenAiApiKey) ||
+    Boolean(ccbLanguagePreference) ||
+    Boolean(ccbAppendSystemPrompt) ||
+    Boolean(ccbCustomSystemPrompt) ||
+    Boolean(ccbSettingsJson) ||
+    ccbEnableWindowsCommandGuidance !== DEFAULT_APP_SETTINGS.ccbEnableWindowsCommandGuidance ||
+    ccbPreferAgentTools !== DEFAULT_APP_SETTINGS.ccbPreferAgentTools ||
+    ccbEnableSkillSearch !== DEFAULT_APP_SETTINGS.ccbEnableSkillSearch ||
+    ccbEnableForkSubagents !== DEFAULT_APP_SETTINGS.ccbEnableForkSubagents ||
+    ccbEnableAgentSwarms !== DEFAULT_APP_SETTINGS.ccbEnableAgentSwarms ||
+    ccbEnableWorktreeTools !== DEFAULT_APP_SETTINGS.ccbEnableWorktreeTools;
   const providerOptions: ProviderStartOptions = {
-    ...(settings.ccbOpenAiBaseUrl || settings.ccbOpenAiApiKey
+    ...(hasCcbOptions
       ? {
           ccb: {
             ...(settings.ccbOpenAiBaseUrl ? { openAiBaseUrl: settings.ccbOpenAiBaseUrl } : {}),
             ...(settings.ccbOpenAiApiKey ? { openAiApiKey: settings.ccbOpenAiApiKey } : {}),
+            ...(ccbLanguagePreference ? { languagePreference: ccbLanguagePreference } : {}),
+            ...(ccbAppendSystemPrompt ? { appendSystemPrompt: ccbAppendSystemPrompt } : {}),
+            ...(ccbCustomSystemPrompt ? { customSystemPrompt: ccbCustomSystemPrompt } : {}),
+            ...(ccbSettingsJson ? { settingsJson: ccbSettingsJson } : {}),
+            enableWindowsCommandGuidance: ccbEnableWindowsCommandGuidance,
+            preferAgentTools: ccbPreferAgentTools,
+            enableSkillSearch: ccbEnableSkillSearch,
+            enableForkSubagents: ccbEnableForkSubagents,
+            enableAgentSwarms: ccbEnableAgentSwarms,
+            enableWorktreeTools: ccbEnableWorktreeTools,
           },
         }
       : {}),

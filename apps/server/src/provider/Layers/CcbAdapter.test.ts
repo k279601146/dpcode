@@ -1,7 +1,7 @@
 import { assert, it, vi } from "@effect/vitest";
 import { Effect, Fiber, Stream } from "effect";
 import { ApprovalRequestId, ThreadId, type ProviderRuntimeEvent } from "@t3tools/contracts";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -229,19 +229,24 @@ function makeMultiTurnFakeBridge(): CcbAdapterLiveOptions & {
   };
 }
 
-function makeFakeVendorBridge(): CcbAdapterLiveOptions {
+function makeFakeVendorBridge(): CcbAdapterLiveOptions & { ripgrepBundlePath: string } {
   const root = mkdtempSync(join(tmpdir(), "dpcode-ccb-adapter-"));
   const sourceDir = join(root, "src");
   const dpcodeDir = join(sourceDir, "dpcode");
+  const ripgrepDir = join(sourceDir, "utils", "vendor", "ripgrep", "x64-win32");
   const bundlePath = join(root, "bridge-bundle.mjs");
 
   mkdirSync(dpcodeDir, { recursive: true });
+  mkdirSync(ripgrepDir, { recursive: true });
   writeFileSync(join(dpcodeDir, "bridge.ts"), "export {}\n");
   writeFileSync(join(sourceDir, "QueryEngine.ts"), "export {}\n");
+  writeFileSync(join(sourceDir, "utils", "ripgrep.ts"), "export {}\n");
+  writeFileSync(join(ripgrepDir, "rg.exe"), "fake ripgrep\n");
   writeFileSync(join(root, "package.json"), '{ "type": "module" }\n');
   writeFileSync(join(root, "bun.lock"), "\n");
 
   return {
+    ripgrepBundlePath: join(root, "vendor", "ripgrep", "x64-win32", "rg.exe"),
     vendorPath: root,
     bridgeBundlePath: bundlePath,
     runBridgeBuild: vi.fn(async (input) => {
@@ -2017,7 +2022,9 @@ layer(
   );
 });
 
-layer(makeFakeVendorBridge())("CcbAdapterLive bridge bundling", (it) => {
+const fakeVendorBridge = makeFakeVendorBridge();
+
+layer(fakeVendorBridge)("CcbAdapterLive bridge bundling", (it) => {
   it.effect("bundles the CCB source bridge before importing it under Node", () =>
     Effect.gen(function* () {
       const adapter = yield* CcbAdapter;
@@ -2037,6 +2044,7 @@ layer(makeFakeVendorBridge())("CcbAdapterLive bridge bundling", (it) => {
 
       const events = Array.from(yield* Fiber.join(eventsFiber));
       assert.equal(session.resumeCursor.ccbSessionId, "ccb-bundled-session");
+      assert.equal(existsSync(fakeVendorBridge.ripgrepBundlePath), true);
       assert.ok(events.some((event) => event.type === "session.started"));
       assert.ok(events.some((event) => event.type === "session.state.changed"));
     }),

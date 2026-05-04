@@ -111,6 +111,16 @@ export const CcbProviderStartOptions = Schema.Struct({
   fallbackModel: Schema.optional(TrimmedNonEmptyString),
   openAiBaseUrl: Schema.optional(TrimmedNonEmptyString),
   openAiApiKey: Schema.optional(TrimmedNonEmptyString),
+  languagePreference: Schema.optional(TrimmedNonEmptyString),
+  appendSystemPrompt: Schema.optional(TrimmedNonEmptyString),
+  customSystemPrompt: Schema.optional(TrimmedNonEmptyString),
+  enableWindowsCommandGuidance: Schema.optional(Schema.Boolean),
+  preferAgentTools: Schema.optional(Schema.Boolean),
+  enableSkillSearch: Schema.optional(Schema.Boolean),
+  enableForkSubagents: Schema.optional(Schema.Boolean),
+  enableAgentSwarms: Schema.optional(Schema.Boolean),
+  enableWorktreeTools: Schema.optional(Schema.Boolean),
+  settingsJson: Schema.optional(TrimmedNonEmptyString),
 });
 export type CcbProviderStartOptions = typeof CcbProviderStartOptions.Type;
 
