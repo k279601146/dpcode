@@ -2113,6 +2113,97 @@ layer(
         content: [
           {
             type: "tool_use",
+            id: "tool-agent-1",
+            name: "Agent",
+            input: { agent_type: "Explore", prompt: "inspect project" },
+          },
+        ],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-agent-1",
+            is_error: true,
+            content:
+              "subagent ended without final response; agentType=Explore agentId=agent-1 lastTool=Glob",
+          },
+        ],
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "Recovered with direct analysis." }],
+      },
+    },
+    { type: "result", subtype: "success", is_error: false },
+  ]),
+)("CcbAdapterLive Agent tool errors", (it) => {
+  it.effect("keeps the Agent tool row failed when the main turn later recovers", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            (event.type === "item.completed" &&
+              event.payload.itemType === "collab_agent_tool_call") ||
+            (event.type === "content.delta" && event.payload.streamKind === "assistant_text") ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-agent-error-recovery-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "inspect project with Explore",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "collab_agent_tool_call" &&
+            event.payload.status === "failed",
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.delta.includes("Recovered with direct analysis."),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) => event.type === "turn.completed" && event.payload.state === "completed",
+        ),
+      );
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
             id: "tool-bash-error-1",
             name: "Bash",
             input: { command: "exit 1" },
