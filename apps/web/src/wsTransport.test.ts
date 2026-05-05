@@ -259,6 +259,13 @@ describe("WsTransport", () => {
     transport.dispose();
   });
 
+  it("does not default browser dev RPC traffic to the Vite page port", () => {
+    const transport = new WsTransport();
+
+    expect(sockets[0]?.url).toBe("ws://localhost:3773");
+    transport.dispose();
+  });
+
   it("refreshes the desktop bridge websocket URL before reconnecting", async () => {
     vi.useFakeTimers();
     const getWsUrl = vi

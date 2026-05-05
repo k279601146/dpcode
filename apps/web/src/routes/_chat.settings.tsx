@@ -446,6 +446,7 @@ function SettingsRouteView() {
     settings.ccbLanguagePreference !== defaults.ccbLanguagePreference ||
     settings.ccbAppendSystemPrompt !== defaults.ccbAppendSystemPrompt ||
     settings.ccbCustomSystemPrompt !== defaults.ccbCustomSystemPrompt ||
+    settings.ccbFastModel !== defaults.ccbFastModel ||
     settings.ccbSettingsJson !== defaults.ccbSettingsJson ||
     settings.ccbEnableWindowsCommandGuidance !== defaults.ccbEnableWindowsCommandGuidance ||
     settings.ccbPreferAgentTools !== defaults.ccbPreferAgentTools ||
@@ -2108,6 +2109,7 @@ function SettingsRouteView() {
                       ccbLanguagePreference: defaults.ccbLanguagePreference,
                       ccbAppendSystemPrompt: defaults.ccbAppendSystemPrompt,
                       ccbCustomSystemPrompt: defaults.ccbCustomSystemPrompt,
+                      ccbFastModel: defaults.ccbFastModel,
                       ccbSettingsJson: defaults.ccbSettingsJson,
                       ccbEnableWindowsCommandGuidance: defaults.ccbEnableWindowsCommandGuidance,
                       ccbPreferAgentTools: defaults.ccbPreferAgentTools,
@@ -2136,6 +2138,24 @@ function SettingsRouteView() {
                 />
                 <span className="mt-1 block text-xs text-muted-foreground">
                   Used to keep CCB replies in the user's preferred language.
+                </span>
+              </label>
+
+              <label htmlFor="ccb-fast-model" className="block">
+                <span className="block text-xs font-medium text-foreground">
+                  Fast model for Explore/Haiku
+                </span>
+                <Input
+                  id="ccb-fast-model"
+                  className="mt-1"
+                  value={settings.ccbFastModel}
+                  onChange={(event) => updateSettings({ ccbFastModel: event.target.value })}
+                  placeholder="gemini-2.5-flash"
+                  spellCheck={false}
+                />
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Maps CCB's haiku alias to a fast 8317 model so Explore stays quick
+                  even when the main model is advanced.
                 </span>
               </label>
 

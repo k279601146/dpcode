@@ -114,6 +114,7 @@ export const CcbProviderStartOptions = Schema.Struct({
   languagePreference: Schema.optional(TrimmedNonEmptyString),
   appendSystemPrompt: Schema.optional(TrimmedNonEmptyString),
   customSystemPrompt: Schema.optional(TrimmedNonEmptyString),
+  fastModel: Schema.optional(TrimmedNonEmptyString),
   enableWindowsCommandGuidance: Schema.optional(Schema.Boolean),
   preferAgentTools: Schema.optional(Schema.Boolean),
   enableSkillSearch: Schema.optional(Schema.Boolean),

@@ -88,6 +88,9 @@ export const AppSettingsSchema = Schema.Struct({
   ccbCustomSystemPrompt: Schema.String.check(Schema.isMaxLength(16000)).pipe(
     withDefaults(() => ""),
   ),
+  ccbFastModel: Schema.String.check(Schema.isMaxLength(256)).pipe(
+    withDefaults(() => "gemini-2.5-flash"),
+  ),
   ccbSettingsJson: Schema.String.check(Schema.isMaxLength(16000)).pipe(withDefaults(() => "")),
   ccbEnableWindowsCommandGuidance: Schema.Boolean.pipe(withDefaults(() => true)),
   ccbPreferAgentTools: Schema.Boolean.pipe(withDefaults(() => true)),
@@ -236,6 +239,7 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     ccbLanguagePreference: settings.ccbLanguagePreference.trim(),
     ccbAppendSystemPrompt: settings.ccbAppendSystemPrompt.trim(),
     ccbCustomSystemPrompt: settings.ccbCustomSystemPrompt.trim(),
+    ccbFastModel: settings.ccbFastModel.trim() || DEFAULT_APP_SETTINGS.ccbFastModel,
     ccbSettingsJson: settings.ccbSettingsJson.trim(),
     chatFontSizePx: normalizeChatFontSizePx(settings.chatFontSizePx),
     customCcbModels: normalizeCustomModelSlugs(settings.customCcbModels, "ccb"),
@@ -391,6 +395,7 @@ export function getProviderStartOptions(
     | "ccbLanguagePreference"
     | "ccbAppendSystemPrompt"
     | "ccbCustomSystemPrompt"
+    | "ccbFastModel"
     | "ccbSettingsJson"
     | "ccbEnableWindowsCommandGuidance"
     | "ccbPreferAgentTools"
@@ -410,6 +415,7 @@ export function getProviderStartOptions(
   const ccbLanguagePreference = settings.ccbLanguagePreference?.trim() ?? "";
   const ccbAppendSystemPrompt = settings.ccbAppendSystemPrompt?.trim() ?? "";
   const ccbCustomSystemPrompt = settings.ccbCustomSystemPrompt?.trim() ?? "";
+  const ccbFastModel = settings.ccbFastModel?.trim() ?? "";
   const ccbSettingsJson = settings.ccbSettingsJson?.trim() ?? "";
   const ccbEnableWindowsCommandGuidance =
     settings.ccbEnableWindowsCommandGuidance ??
@@ -430,6 +436,7 @@ export function getProviderStartOptions(
     Boolean(ccbLanguagePreference) ||
     Boolean(ccbAppendSystemPrompt) ||
     Boolean(ccbCustomSystemPrompt) ||
+    Boolean(ccbFastModel) ||
     Boolean(ccbSettingsJson) ||
     ccbEnableWindowsCommandGuidance !== DEFAULT_APP_SETTINGS.ccbEnableWindowsCommandGuidance ||
     ccbPreferAgentTools !== DEFAULT_APP_SETTINGS.ccbPreferAgentTools ||
@@ -446,6 +453,7 @@ export function getProviderStartOptions(
             ...(ccbLanguagePreference ? { languagePreference: ccbLanguagePreference } : {}),
             ...(ccbAppendSystemPrompt ? { appendSystemPrompt: ccbAppendSystemPrompt } : {}),
             ...(ccbCustomSystemPrompt ? { customSystemPrompt: ccbCustomSystemPrompt } : {}),
+            ...(ccbFastModel ? { fastModel: ccbFastModel } : {}),
             ...(ccbSettingsJson ? { settingsJson: ccbSettingsJson } : {}),
             enableWindowsCommandGuidance: ccbEnableWindowsCommandGuidance,
             preferAgentTools: ccbPreferAgentTools,

@@ -126,6 +126,7 @@ type CcbBridgeModule = {
     openAiApiKey?: string;
     languagePreference?: string;
     customSystemPrompt?: string;
+    fastModel?: string;
     initialMessages?: unknown[];
     appendSystemPrompt?: string;
     settingsJson?: string;
@@ -869,9 +870,9 @@ function buildCcbDpcodeSystemPrompt(input: {
     sections.push(
       [
         "# DP Code Windows command policy",
-        "This DP Code session is running on Windows. Prefer PowerShell-compatible commands and tools by default.",
-        "Use commands such as Get-ChildItem, Select-String, Get-Content, Test-Path, Resolve-Path, New-Item, Remove-Item, Move-Item, and Copy-Item.",
-        "Do not default to Unix-only commands such as ls -R, grep, cat, sed, awk, chmod, or rm unless you have verified they are available and appropriate.",
+        "This DP Code session is running on Windows. For file operations and code search, prefer CCB's native Read, Edit, Write, Glob, Grep, and related tools before falling back to shell commands.",
+        "When a shell command is genuinely needed, prefer PowerShell-compatible commands such as Get-ChildItem, Select-String, Get-Content, Test-Path, Resolve-Path, New-Item, Remove-Item, Move-Item, and Copy-Item.",
+        "Do not default to Unix-only shell commands such as ls -R, grep, cat, sed, awk, chmod, or rm unless you have verified they are available and appropriate.",
       ].join("\n"),
     );
   }
@@ -881,7 +882,9 @@ function buildCcbDpcodeSystemPrompt(input: {
       [
         "# DP Code CCB agent and skill policy",
         "For broad project analysis, multi-file investigation, planning, review, or parallelizable work, actively use CCB Agent, Skill, Task, Explore, Plan, Swarm, or Worktree tools when they are available and relevant.",
-        "If an Agent or Skill tool is available, prefer delegating bounded exploration or planning work instead of doing every repository scan in one long shell command.",
+        "If an Agent or Skill tool is available, delegate bounded exploration or planning work instead of doing every repository scan in one long shell command.",
+        "For open-ended project analysis, do not stop after reading only a root manifest. Build a compact map from targeted Glob/Grep/Read calls, use Explore for repository discovery when useful, and provide the best architecture synthesis you can without asking the user which file to inspect next unless there is a real product decision to make.",
+        "When Glob or Grep times out on a broad pattern, narrow by path, glob, type, or head_limit and continue with CCB native search/read tools rather than treating the timeout as a completed analysis.",
       ].join("\n"),
     );
   }
@@ -2480,6 +2483,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               ...(ccbOptions?.customSystemPrompt
                 ? { customSystemPrompt: ccbOptions.customSystemPrompt }
                 : {}),
+              ...(ccbOptions?.fastModel ? { fastModel: ccbOptions.fastModel } : {}),
               ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
               ...(ccbOptions?.settingsJson ? { settingsJson: ccbOptions.settingsJson } : {}),
               featureOptions: {

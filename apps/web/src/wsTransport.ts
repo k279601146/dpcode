@@ -80,11 +80,24 @@ export class WsTransport {
     if (window.desktopBridge && (!bridgeUrl || bridgeUrl.length === 0)) {
       console.warn("Desktop bridge did not provide a WebSocket URL; falling back to web env URL.");
     }
-    return bridgeUrl && bridgeUrl.length > 0
-      ? bridgeUrl
-      : envUrl && envUrl.length > 0
-        ? envUrl
-        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`;
+    if (bridgeUrl && bridgeUrl.length > 0) {
+      return bridgeUrl;
+    }
+    if (envUrl && envUrl.length > 0) {
+      return envUrl;
+    }
+
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const hostname = window.location.hostname || "127.0.0.1";
+
+    if (import.meta.env.DEV) {
+      // In Vite dev, the page port is the HMR server. Connecting RPC traffic
+      // there opens successfully but never responds, surfacing as misleading
+      // request timeouts. Browser dev backend defaults to 3773.
+      return `${protocol}://${hostname}:3773`;
+    }
+
+    return `${protocol}://${hostname}:${window.location.port}`;
   }
 
   async request<T = unknown>(

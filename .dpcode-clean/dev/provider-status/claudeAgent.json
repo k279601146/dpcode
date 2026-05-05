@@ -3,6 +3,6 @@
   "status": "error",
   "available": true,
   "authStatus": "unauthenticated",
-  "checkedAt": "2026-05-04T15:29:07.799Z",
+  "checkedAt": "2026-05-05T02:05:39.761Z",
   "message": "Claude is not authenticated. Run `claude auth login` and try again."
 }
