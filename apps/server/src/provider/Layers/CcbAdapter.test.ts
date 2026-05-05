@@ -1707,21 +1707,38 @@ const workspaceContextCreateSession = vi.fn(async () => ({
   setModel: vi.fn(),
 }));
 
+const workspaceContextBindCwd = vi.fn(async (_cwd: string, operation: () => Promise<unknown>) =>
+  operation(),
+);
+
 layer({
   bridgeModule: {
     createDpcodeCcbSession: workspaceContextCreateSession,
+    runDpcodeCcbWithCwd: workspaceContextBindCwd,
   },
 })("CcbAdapterLive workspace context", (it) => {
   it.effect("passes the active workspace cwd into the CCB session context prompt", () =>
     Effect.gen(function* () {
       workspaceContextCreateSession.mockClear();
+      workspaceContextBindCwd.mockClear();
       const adapter = yield* CcbAdapter;
       const cwd = "D:\\workkaifa\\testcode\\t3test";
+      const threadId = ThreadId.makeUnsafe("thread-ccb-workspace-context-test");
 
       yield* adapter.startSession({
-        threadId: ThreadId.makeUnsafe("thread-ccb-workspace-context-test"),
+        threadId,
         provider: "ccb",
         cwd,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        provider: "ccb",
+        message: {
+          role: "user",
+          content: [{ type: "input_text", text: "current path?" }],
+        },
         runtimeMode: "full-access",
       });
 
@@ -1730,6 +1747,7 @@ layer({
         | undefined;
       assert.equal(input?.cwd, cwd);
       assert.equal((input?.appendSystemPrompt ?? "").includes(cwd), true);
+      assert.equal(workspaceContextBindCwd.mock.calls.at(-1)?.[0], cwd);
     }),
   );
 });
@@ -1912,6 +1930,7 @@ layer({
       getMessages: () => [{ role: "assistant", content: "persisted transcript" }],
       setModel: vi.fn(),
     })),
+    runDpcodeCcbWithCwd: vi.fn(async (_cwd: string, operation: () => Promise<unknown>) => operation()),
   },
 })("CcbAdapterLive resume", (it) => {
   it.effect("persists transcript messages and injects them when resuming", () =>

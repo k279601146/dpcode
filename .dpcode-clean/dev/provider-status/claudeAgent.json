@@ -1,8 +1,8 @@
 {
   "provider": "claudeAgent",
-  "status": "warning",
+  "status": "error",
   "available": true,
-  "authStatus": "unknown",
-  "checkedAt": "2026-05-05T08:29:06.648Z",
-  "message": "Could not verify Claude authentication status. Timed out while running command."
+  "authStatus": "unauthenticated",
+  "checkedAt": "2026-05-05T10:10:36.922Z",
+  "message": "Claude is not authenticated. Run `claude auth login` and try again."
 }

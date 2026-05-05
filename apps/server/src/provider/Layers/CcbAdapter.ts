@@ -138,6 +138,10 @@ type CcbBridgeModule = {
     };
     canUseTool: (...args: ReadonlyArray<unknown>) => Promise<Record<string, unknown>>;
   }): Promise<CcbSessionHandle>;
+  runDpcodeCcbWithCwd?(
+    cwd: string,
+    operation: () => Promise<unknown>,
+  ): Promise<unknown>;
   listDpcodeCcbCommands?(cwd: string): Promise<ReadonlyArray<{ name: string; description?: string }>>;
   listDpcodeCcbSkills?(
     cwd: string,
@@ -1345,6 +1349,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
     const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.makeUnsafe(id));
 
     let bridgeModulePromise: Promise<CcbBridgeModule> | undefined;
+    let bridgeStateLock: Promise<void> = Promise.resolve();
     const loadBridgeModule = () =>
       Effect.tryPromise({
         try: async () => {
@@ -1364,6 +1369,32 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             detail: toMessage(cause, "Failed to load CCB bridge"),
             cause,
           }),
+      });
+
+    const withBridgeStateLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const previous = bridgeStateLock;
+      let release!: () => void;
+      bridgeStateLock = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous.catch(() => undefined);
+      try {
+        return await operation();
+      } finally {
+        release();
+      }
+    };
+
+    const runWithBoundCcbCwd = async <T>(input: {
+      bridge: CcbBridgeModule;
+      cwd?: string;
+      operation: () => Promise<T>;
+    }): Promise<T> =>
+      withBridgeStateLock(async () => {
+        if (input.cwd && input.bridge.runDpcodeCcbWithCwd) {
+          return (await input.bridge.runDpcodeCcbWithCwd(input.cwd, input.operation)) as T;
+        }
+        return await input.operation();
       });
 
     const makeStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
@@ -2649,8 +2680,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         const handle = yield* Effect.tryPromise({
           try: () =>
-            bridge.createDpcodeCcbSession({
-              cwd: sessionWorkspaceCwd ?? process.cwd(),
+            runWithBoundCcbCwd({
+              bridge,
+              cwd: sessionWorkspaceCwd,
+              operation: () =>
+                bridge.createDpcodeCcbSession({
+                  cwd: sessionWorkspaceCwd ?? process.cwd(),
               ...(input.modelSelection?.provider === PROVIDER ? { model: input.modelSelection.model } : {}),
               ...(input.providerOptions?.ccb?.fallbackModel
                 ? { fallbackModel: input.providerOptions.ccb.fallbackModel }
@@ -2687,8 +2722,8 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   ? { enableWorktreeTools: ccbOptions.enableWorktreeTools }
                   : {}),
               },
-              ...(initialMessages ? { initialMessages } : {}),
-              canUseTool: async (...args: ReadonlyArray<unknown>) => {
+                  ...(initialMessages ? { initialMessages } : {}),
+                  canUseTool: async (...args: ReadonlyArray<unknown>) => {
                 const [tool, toolInput, , , toolUseId] = args;
                 const inputObject = asObject(toolInput) ?? {};
                 const context = contextRef;
@@ -2805,9 +2840,10 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   },
                 } satisfies ProviderRuntimeEvent));
 
-                const resolved = await decisionPromise;
-                return approvalDecisionToCcb(resolved, inputObject);
-              },
+                    const resolved = await decisionPromise;
+                    return approvalDecisionToCcb(resolved, inputObject);
+                  },
+                }),
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -2876,7 +2912,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         if (bridge.listDpcodeCcbMcpStatus && sessionWorkspaceCwd) {
           const mcpStatus = yield* Effect.tryPromise({
-            try: () => bridge.listDpcodeCcbMcpStatus!(sessionWorkspaceCwd),
+            try: () =>
+              runWithBoundCcbCwd({
+                bridge,
+                cwd: sessionWorkspaceCwd,
+                operation: () => bridge.listDpcodeCcbMcpStatus!(sessionWorkspaceCwd),
+              }),
             catch: (cause) =>
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -2948,62 +2989,71 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const queryInput = yield* buildCcbQueryInput(input, attachmentsDir);
         const runStream = Effect.tryPromise({
           try: async () => {
-            try {
-              for await (const message of context.handle.submitMessage(queryInput, { uuid: turnId })) {
-                await Effect.runPromise(mapSdkMessage(context, turnId, message));
-              }
-              context.activeTurnId = undefined;
-              context.session = {
-                ...context.session,
-                status: "ready",
-                activeTurnId: undefined,
-                resumeCursor: {
-                  ccbSessionId: context.handle.sessionId,
-                  transcriptPath: context.transcriptPath,
-                  turnCount: context.turns.length,
-                },
-                updatedAt: new Date().toISOString(),
-              };
-              try {
-                await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
-              } catch (cause) {
-                await Effect.runPromise(
-                  emitRuntimeError(
-                    context,
-                    toMessage(cause, "Failed to persist CCB transcript"),
-                    cause,
-                  ),
-                );
-              }
-              await Effect.runPromise(emitSessionState(context, "ready"));
-            } catch (cause) {
-              await Effect.runPromise(emitRuntimeError(context, toMessage(cause, "CCB turn failed"), cause));
-              const errorStamp = {
-                eventId: EventId.makeUnsafe(crypto.randomUUID()),
-                createdAt: new Date().toISOString(),
-              };
-              await Effect.runPromise(Queue.offer(runtimeEventQueue, {
-                type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
-                eventId: errorStamp.eventId,
-                provider: PROVIDER,
-                threadId: input.threadId,
-                turnId,
-                createdAt: errorStamp.createdAt,
-                payload:
-                  context.handle.getAbortSignal().aborted
-                    ? { reason: "interrupted" }
-                    : { state: "failed", errorMessage: toMessage(cause, "CCB turn failed") },
-                providerRefs: { providerThreadId: context.handle.sessionId },
-              } satisfies ProviderRuntimeEvent));
-              context.activeTurnId = undefined;
-              context.session = {
-                ...context.session,
-                status: "error",
-                activeTurnId: undefined,
-                lastError: toMessage(cause, "CCB turn failed"),
-                updatedAt: new Date().toISOString(),
-              };
-            }
+            const bridge = await Effect.runPromise(loadBridgeModule());
+            await runWithBoundCcbCwd({
+              bridge,
+              cwd: context.session.cwd ?? undefined,
+              operation: async () => {
+                try {
+                  for await (const message of context.handle.submitMessage(queryInput, { uuid: turnId })) {
+                    await Effect.runPromise(mapSdkMessage(context, turnId, message));
+                  }
+                  context.activeTurnId = undefined;
+                  context.session = {
+                    ...context.session,
+                    status: "ready",
+                    activeTurnId: undefined,
+                    resumeCursor: {
+                      ccbSessionId: context.handle.sessionId,
+                      transcriptPath: context.transcriptPath,
+                      turnCount: context.turns.length,
+                    },
+                    updatedAt: new Date().toISOString(),
+                  };
+                  try {
+                    await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
+                  } catch (cause) {
+                    await Effect.runPromise(
+                      emitRuntimeError(
+                        context,
+                        toMessage(cause, "Failed to persist CCB transcript"),
+                        cause,
+                      ),
+                    );
+                  }
+                  await Effect.runPromise(emitSessionState(context, "ready"));
+                } catch (cause) {
+                  await Effect.runPromise(
+                    emitRuntimeError(context, toMessage(cause, "CCB turn failed"), cause),
+                  );
+                  const errorStamp = {
+                    eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                    createdAt: new Date().toISOString(),
+                  };
+                  await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                    type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
+                    eventId: errorStamp.eventId,
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    createdAt: errorStamp.createdAt,
+                    payload:
+                      context.handle.getAbortSignal().aborted
+                        ? { reason: "interrupted" }
+                        : { state: "failed", errorMessage: toMessage(cause, "CCB turn failed") },
+                    providerRefs: { providerThreadId: context.handle.sessionId },
+                  } satisfies ProviderRuntimeEvent));
+                  context.activeTurnId = undefined;
+                  context.session = {
+                    ...context.session,
+                    status: "error",
+                    activeTurnId: undefined,
+                    lastError: toMessage(cause, "CCB turn failed"),
+                    updatedAt: new Date().toISOString(),
+                  };
+                }
+              },
+            });
           },
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -3212,64 +3262,71 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         yield* Effect.tryPromise({
           try: async () => {
-            try {
-              for await (const message of context.handle.submitMessage("/compact", { uuid: turnId })) {
-                await Effect.runPromise(mapSdkMessage(context, turnId, message));
-              }
-              context.activeTurnId = undefined;
-              context.session = {
-                ...context.session,
-                status: "ready",
-                activeTurnId: undefined,
-                resumeCursor: {
-                  ccbSessionId: context.handle.sessionId,
-                  transcriptPath: context.transcriptPath,
-                  turnCount: context.turns.length,
-                },
-                updatedAt: new Date().toISOString(),
-              };
-              try {
-                await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
-              } catch (cause) {
-                await Effect.runPromise(
-                  emitRuntimeError(
-                    context,
-                    toMessage(cause, "Failed to persist CCB transcript"),
-                    cause,
-                  ),
-                );
-              }
-              await Effect.runPromise(emitSessionState(context, "ready"));
-            } catch (cause) {
-              await Effect.runPromise(
-                emitRuntimeError(context, toMessage(cause, "CCB compact failed"), cause),
-              );
-              const errorStamp = {
-                eventId: EventId.makeUnsafe(crypto.randomUUID()),
-                createdAt: new Date().toISOString(),
-              };
-              await Effect.runPromise(Queue.offer(runtimeEventQueue, {
-                type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
-                eventId: errorStamp.eventId,
-                provider: PROVIDER,
-                threadId,
-                turnId,
-                createdAt: errorStamp.createdAt,
-                payload:
-                  context.handle.getAbortSignal().aborted
-                    ? { reason: "interrupted" }
-                    : { state: "failed", errorMessage: toMessage(cause, "CCB compact failed") },
-                providerRefs: { providerThreadId: context.handle.sessionId },
-              } satisfies ProviderRuntimeEvent));
-              context.activeTurnId = undefined;
-              context.session = {
-                ...context.session,
-                status: "error",
-                activeTurnId: undefined,
-                lastError: toMessage(cause, "CCB compact failed"),
-                updatedAt: new Date().toISOString(),
-              };
-            }
+            const bridge = await Effect.runPromise(loadBridgeModule());
+            await runWithBoundCcbCwd({
+              bridge,
+              cwd: context.session.cwd ?? undefined,
+              operation: async () => {
+                try {
+                  for await (const message of context.handle.submitMessage("/compact", { uuid: turnId })) {
+                    await Effect.runPromise(mapSdkMessage(context, turnId, message));
+                  }
+                  context.activeTurnId = undefined;
+                  context.session = {
+                    ...context.session,
+                    status: "ready",
+                    activeTurnId: undefined,
+                    resumeCursor: {
+                      ccbSessionId: context.handle.sessionId,
+                      transcriptPath: context.transcriptPath,
+                      turnCount: context.turns.length,
+                    },
+                    updatedAt: new Date().toISOString(),
+                  };
+                  try {
+                    await writeCcbTranscript(context.transcriptPath, context.handle.getMessages());
+                  } catch (cause) {
+                    await Effect.runPromise(
+                      emitRuntimeError(
+                        context,
+                        toMessage(cause, "Failed to persist CCB transcript"),
+                        cause,
+                      ),
+                    );
+                  }
+                  await Effect.runPromise(emitSessionState(context, "ready"));
+                } catch (cause) {
+                  await Effect.runPromise(
+                    emitRuntimeError(context, toMessage(cause, "CCB compact failed"), cause),
+                  );
+                  const errorStamp = {
+                    eventId: EventId.makeUnsafe(crypto.randomUUID()),
+                    createdAt: new Date().toISOString(),
+                  };
+                  await Effect.runPromise(Queue.offer(runtimeEventQueue, {
+                    type: context.handle.getAbortSignal().aborted ? "turn.aborted" : "turn.completed",
+                    eventId: errorStamp.eventId,
+                    provider: PROVIDER,
+                    threadId,
+                    turnId,
+                    createdAt: errorStamp.createdAt,
+                    payload:
+                      context.handle.getAbortSignal().aborted
+                        ? { reason: "interrupted" }
+                        : { state: "failed", errorMessage: toMessage(cause, "CCB compact failed") },
+                    providerRefs: { providerThreadId: context.handle.sessionId },
+                  } satisfies ProviderRuntimeEvent));
+                  context.activeTurnId = undefined;
+                  context.session = {
+                    ...context.session,
+                    status: "error",
+                    activeTurnId: undefined,
+                    lastError: toMessage(cause, "CCB compact failed"),
+                    updatedAt: new Date().toISOString(),
+                  };
+                }
+              },
+            });
           },
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -3318,7 +3375,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           return { commands: [], source: PROVIDER, cached: false } satisfies ProviderListCommandsResult;
         }
         const commands = yield* Effect.tryPromise({
-          try: () => bridge.listDpcodeCcbCommands!(input.cwd),
+          try: () =>
+            runWithBoundCcbCwd({
+              bridge,
+              cwd: input.cwd,
+              operation: () => bridge.listDpcodeCcbCommands!(input.cwd),
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -3344,7 +3406,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           return { skills: [], source: PROVIDER, cached: false } satisfies ProviderListSkillsResult;
         }
         const skills = yield* Effect.tryPromise({
-          try: () => bridge.listDpcodeCcbSkills!(input.cwd),
+          try: () =>
+            runWithBoundCcbCwd({
+              bridge,
+              cwd: input.cwd,
+              operation: () => bridge.listDpcodeCcbSkills!(input.cwd),
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -3384,7 +3451,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           return { agents: [], source: "empty", cached: false } satisfies ProviderListAgentsResult;
         }
         const agents = yield* Effect.tryPromise({
-          try: () => bridge.listDpcodeCcbAgents!(input.cwd),
+          try: () =>
+            runWithBoundCcbCwd({
+              bridge,
+              cwd: input.cwd,
+              operation: () => bridge.listDpcodeCcbAgents!(input.cwd),
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
