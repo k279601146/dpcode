@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v9";
+const CCB_BRIDGE_CACHE_VERSION = "v10";
 const SUPPORTED_CCB_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -181,7 +181,11 @@ type CcbSessionHandle = {
   sessionId: string;
   submitMessage(
     prompt: string | ReadonlyArray<unknown>,
-    options?: { uuid?: string; isMeta?: boolean },
+    options?: {
+      uuid?: string;
+      isMeta?: boolean;
+      selectedSkills?: ReadonlyArray<{ name: string; path?: string }>;
+    },
   ): AsyncGenerator<Record<string, unknown>, void, unknown>;
   interrupt(): void;
   resetAbortController(): void;
@@ -194,6 +198,7 @@ type CcbSessionHandle = {
     command?: string;
   }>;
   setPermissionMode?(mode: string): void;
+  getMcpStatus?(): unknown;
 };
 
 type PendingApproval = {
@@ -900,16 +905,7 @@ function buildPromptText(input: ProviderSendTurnInput): string {
     text: subagentPrompt,
     interactionMode: input.interactionMode,
   });
-  const skills = input.skills ?? [];
   const mentions = input.mentions ?? [];
-  const skillsPrompt =
-    skills.length > 0
-      ? [
-          "",
-          "DPCode selected these skills for this turn. Use them when relevant:",
-          ...skills.map((skill) => `- ${skill.name} (${skill.path})`),
-        ].join("\n")
-      : "";
   const mentionsPrompt =
     mentions.length > 0
       ? [
@@ -920,7 +916,6 @@ function buildPromptText(input: ProviderSendTurnInput): string {
       : "";
   return [
     prompt,
-    skillsPrompt,
     mentionsPrompt,
   ]
     .filter((part) => part.length > 0)
@@ -931,7 +926,6 @@ function buildCcbDpcodeSystemPrompt(input: {
   readonly languagePreference?: string;
   readonly userAppendSystemPrompt?: string;
   readonly enableWindowsCommandGuidance?: boolean;
-  readonly workspaceCwd?: string;
 }): string | undefined {
   const sections: string[] = [];
   const languagePreference = input.languagePreference?.trim();
@@ -952,18 +946,6 @@ function buildCcbDpcodeSystemPrompt(input: {
         "When a shell command is genuinely needed, prefer PowerShell-compatible commands such as Get-ChildItem, Select-String, Get-Content, Test-Path, Resolve-Path, New-Item, Remove-Item, Move-Item, and Copy-Item.",
         "Do not default to Unix-only shell commands such as ls -R, grep, cat, sed, awk, chmod, or rm unless you have verified they are available and appropriate.",
         "When you start a background development server, inspect the latest task output or output file and report concrete local/network URLs instead of placeholder ports.",
-      ].join("\n"),
-    );
-  }
-
-  const workspaceCwd = input.workspaceCwd?.trim();
-  if (workspaceCwd) {
-    sections.push(
-      [
-        "# DP Code workspace context",
-        `The active project directory for this session is ${workspaceCwd}.`,
-        "Treat that directory as the current workspace root unless the user explicitly switches folders.",
-        "When you report the current project path or working directory, use that exact directory.",
       ].join("\n"),
     );
   }
@@ -1117,13 +1099,12 @@ function ccbTranscriptPath(threadId: ThreadId, sessionId: string): string {
 
 async function readCcbTranscript(transcriptPath: string | undefined): Promise<unknown[] | undefined> {
   if (!transcriptPath) return undefined;
-  try {
-    const raw = await readFile(transcriptPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
+  const raw = await readFile(transcriptPath, "utf8");
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`CCB transcript is malformed: expected an array at ${transcriptPath}`);
   }
+  return parsed;
 }
 
 async function writeCcbTranscript(transcriptPath: string, messages: readonly unknown[]): Promise<void> {
@@ -2316,6 +2297,16 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
               }
               const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              const command = firstNestedString(message, ["command"]);
+              const cwd = firstNestedString(message, ["cwd"]);
+              const error = firstNestedString(message, ["error", "errorMessage", "message"]);
+              const finalMessage = firstNestedString(message, ["final_message", "finalMessage"]);
+              const output = firstNestedString(message, ["output", "stdout", "stderr"]);
+              const fullOutput = firstNestedString(message, ["fullOutput", "full_output"]);
+              const outputPath = firstNestedString(message, ["output_path", "outputPath", "file_path", "filePath"]);
+              const worktreePath = firstNestedString(message, ["worktree_path", "worktreePath"]);
+              const worktreeBranch = firstNestedString(message, ["worktree_branch", "worktreeBranch"]);
+              const urls = extractUrlsFromText(output, fullOutput, outputPath, finalMessage);
               yield* offer({
                 ...base,
                 type: "task.completed",
@@ -2324,6 +2315,17 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   status: ccbTaskStatus(message.status),
                   ...(asString(message.summary) ? { summary: asString(message.summary) } : {}),
                   ...(message.usage ? { usage: message.usage } : {}),
+                  ...(asString(message.last_tool_name) ? { lastToolName: asString(message.last_tool_name) } : {}),
+                  ...(command ? { command } : {}),
+                  ...(cwd ? { cwd } : {}),
+                  ...(error ? { error } : {}),
+                  ...(finalMessage ? { finalMessage } : {}),
+                  ...(output ? { output } : {}),
+                  ...(fullOutput ? { fullOutput } : {}),
+                  ...(outputPath ? { outputPath } : {}),
+                  ...(worktreePath ? { worktreePath } : {}),
+                  ...(worktreeBranch ? { worktreeBranch } : {}),
+                  ...(urls.length > 0 ? { urls } : {}),
                 },
               });
               return;
@@ -2664,7 +2666,6 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           languagePreference: ccbOptions?.languagePreference,
           userAppendSystemPrompt: ccbOptions?.appendSystemPrompt,
           enableWindowsCommandGuidance: ccbOptions?.enableWindowsCommandGuidance,
-          workspaceCwd: sessionWorkspaceCwd,
         });
         let contextRef: CcbSessionContext | undefined;
         const initialMessages = yield* Effect.tryPromise({
@@ -2910,6 +2911,10 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
         yield* emitSessionState(context, "ready");
 
+        if (handle.getMcpStatus) {
+          yield* emitMcpStatus(context, handle.getMcpStatus());
+        }
+
         if (bridge.listDpcodeCcbMcpStatus && sessionWorkspaceCwd) {
           const mcpStatus = yield* Effect.tryPromise({
             try: () =>
@@ -2995,7 +3000,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               cwd: context.session.cwd ?? undefined,
               operation: async () => {
                 try {
-                  for await (const message of context.handle.submitMessage(queryInput, { uuid: turnId })) {
+                  for await (const message of context.handle.submitMessage(queryInput, {
+                    uuid: turnId,
+                    selectedSkills: (input.skills ?? []).map((skill) => ({
+                      name: skill.name,
+                      ...(skill.path ? { path: skill.path } : {}),
+                    })),
+                  })) {
                     await Effect.runPromise(mapSdkMessage(context, turnId, message));
                   }
                   context.activeTurnId = undefined;

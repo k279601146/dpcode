@@ -3,7 +3,7 @@ import { Effect, Fiber, Stream } from "effect";
 import { ApprovalRequestId, ThreadId, type ProviderRuntimeEvent } from "@t3tools/contracts";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { CcbAdapter } from "../Services/CcbAdapter.ts";
 import { makeCcbAdapterLive, type CcbAdapterLiveOptions } from "./CcbAdapter.ts";
@@ -375,14 +375,17 @@ layer(
 
 const inputBridge = (() => {
   const submitInputs: Array<unknown> = [];
+  const submitOptions: Array<unknown> = [];
   return {
     submitInputs,
+    submitOptions,
     attachmentsDir: makeTestAttachmentsDir(),
     bridgeModule: {
       createDpcodeCcbSession: vi.fn(async () => ({
         sessionId: "ccb-session-input",
-        async *submitMessage(prompt: unknown) {
+        async *submitMessage(prompt: unknown, options: unknown) {
           submitInputs.push(prompt);
+          submitOptions.push(options);
           yield { type: "result", subtype: "success", is_error: false };
         },
         interrupt: vi.fn(),
@@ -394,12 +397,13 @@ const inputBridge = (() => {
     },
   } satisfies CcbAdapterLiveOptions & {
     submitInputs: Array<unknown>;
+    submitOptions: Array<unknown>;
     attachmentsDir: string;
   };
 })();
 
 layer(inputBridge)("CcbAdapterLive turn input", (it) => {
-  it.effect("builds CCB content blocks for text, images, skills, and mentions", () =>
+  it.effect("builds CCB content blocks and passes selected skills structurally", () =>
     Effect.gen(function* () {
       const adapter = yield* CcbAdapter;
       const threadId = ThreadId.makeUnsafe("thread-ccb-input-blocks-test");
@@ -441,8 +445,11 @@ layer(inputBridge)("CcbAdapterLive turn input", (it) => {
       const blocks = input as Array<Record<string, unknown>>;
       assert.equal(blocks[0]?.type, "text");
       assert.match(String(blocks[0]?.text), /Use the "plan" agent/);
-      assert.match(String(blocks[0]?.text), /verify \(ccb:\/\/bundled\/verify\)/);
+      assert.equal(/verify \(ccb:\/\/bundled\/verify\)/.test(String(blocks[0]?.text)), false);
       assert.match(String(blocks[0]?.text), /README\.md \(README\.md\)/);
+      assert.deepEqual((inputBridge.submitOptions[0] as { selectedSkills?: unknown }).selectedSkills, [
+        { name: "verify", path: "ccb://bundled/verify" },
+      ]);
       const image = blocks.find((block) => block.type === "image") as
         | { source?: { media_type?: string; data?: string } }
         | undefined;
@@ -1191,6 +1198,11 @@ layer(
       status: "completed",
       summary: "Subtask done",
       usage: { input_tokens: 25, output_tokens: 15 },
+      final_message: "Agent finished with notes",
+      output: "Server listening at http://localhost:4173",
+      output_path: "C:\\Temp\\task-ccb-1.output",
+      worktree_path: "D:\\worktrees\\task-ccb-1",
+      worktree_branch: "agent/task-ccb-1",
     },
     {
       type: "tool_progress",
@@ -1301,7 +1313,11 @@ layer(
           (event) =>
             event.type === "task.completed" &&
             event.payload.status === "completed" &&
-            event.payload.summary === "Subtask done",
+            event.payload.summary === "Subtask done" &&
+            event.payload.finalMessage === "Agent finished with notes" &&
+            event.payload.outputPath === "C:\\Temp\\task-ccb-1.output" &&
+            event.payload.worktreeBranch === "agent/task-ccb-1" &&
+            event.payload.urls?.includes("http://localhost:4173"),
         ),
       );
       assert.ok(
@@ -1717,7 +1733,7 @@ layer({
     runDpcodeCcbWithCwd: workspaceContextBindCwd,
   },
 })("CcbAdapterLive workspace context", (it) => {
-  it.effect("passes the active workspace cwd into the CCB session context prompt", () =>
+  it.effect("passes the active workspace cwd through CCB native cwd binding", () =>
     Effect.gen(function* () {
       workspaceContextCreateSession.mockClear();
       workspaceContextBindCwd.mockClear();
@@ -1746,7 +1762,7 @@ layer({
         | { cwd?: string; appendSystemPrompt?: string }
         | undefined;
       assert.equal(input?.cwd, cwd);
-      assert.equal((input?.appendSystemPrompt ?? "").includes(cwd), true);
+      assert.equal((input?.appendSystemPrompt ?? "").includes(cwd), false);
       assert.equal(workspaceContextBindCwd.mock.calls.at(-1)?.[0], cwd);
     }),
   );
@@ -1975,6 +1991,95 @@ layer({
       assert.equal(resumed.resumeCursor.ccbSessionId, "ccb-session-resumed");
       assert.equal(resumed.resumeCursor.turnCount, 1);
       assert.equal(resumed.resumeCursor.transcriptPath, cursor.transcriptPath);
+    }),
+  );
+
+  it.effect("fails visibly when a resume transcript is malformed", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe(`thread-ccb-bad-resume-test-${crypto.randomUUID()}`);
+      const transcriptPath = join(tmpdir(), "dpcode-ccb-transcripts", String(threadId), "bad.json");
+      mkdirSync(dirname(transcriptPath), { recursive: true });
+      writeFileSync(transcriptPath, "{\"not\":\"a transcript\"}", "utf8");
+
+      let detail = "";
+      yield* adapter
+        .startSession({
+          threadId,
+          provider: "ccb",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            ccbSessionId: "bad-session",
+            transcriptPath,
+            turnCount: 1,
+          },
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              detail = error.detail;
+            }),
+          ),
+        );
+
+      assert.match(detail, /Failed to read CCB transcript|malformed/);
+    }),
+  );
+});
+
+layer({
+  bridgeModule: {
+    createDpcodeCcbSession: vi.fn(async () => ({
+      sessionId: "ccb-session-live-mcp",
+      async *submitMessage() {
+        yield { type: "result", subtype: "success", is_error: false };
+      },
+      interrupt: vi.fn(),
+      resetAbortController: vi.fn(),
+      getAbortSignal: () => new AbortController().signal,
+      getMessages: () => [],
+      setModel: vi.fn(),
+      getMcpStatus: vi.fn(() => ({
+        servers: [
+          { name: "filesystem", transport: "stdio", enabled: true },
+          { name: "github", transport: "stdio", enabled: false },
+        ],
+        errors: ["github: bad token"],
+        tools: [{ name: "mcp__filesystem__read_file" }],
+        commands: [{ name: "mcp-command" }],
+        resources: [{ server: "filesystem", count: 2 }],
+      })),
+    })),
+  },
+})("CcbAdapterLive live MCP status", (it) => {
+  it.effect("emits live MCP tools, resources, and connection errors from the session handle", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const threadId = ThreadId.makeUnsafe("thread-ccb-live-mcp-status-test");
+      const statusFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "mcp.status.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(statusFiber));
+      const status = events[0]?.payload.status as {
+        errors?: string[];
+        tools?: Array<{ name?: string }>;
+        resources?: Array<{ server?: string; count?: number }>;
+      };
+      assert.ok(status.errors?.includes("github: bad token"));
+      assert.equal(status.tools?.[0]?.name, "mcp__filesystem__read_file");
+      assert.equal(status.resources?.[0]?.count, 2);
     }),
   );
 });

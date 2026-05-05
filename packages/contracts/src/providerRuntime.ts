@@ -491,6 +491,17 @@ const TaskCompletedPayload = Schema.Struct({
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
+  lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  command: Schema.optional(TrimmedNonEmptyStringSchema),
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  error: Schema.optional(Schema.String),
+  finalMessage: Schema.optional(Schema.String),
+  output: Schema.optional(Schema.String),
+  fullOutput: Schema.optional(Schema.String),
+  outputPath: Schema.optional(TrimmedNonEmptyStringSchema),
+  worktreePath: Schema.optional(TrimmedNonEmptyStringSchema),
+  worktreeBranch: Schema.optional(TrimmedNonEmptyStringSchema),
+  urls: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 
