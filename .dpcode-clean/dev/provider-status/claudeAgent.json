@@ -1,8 +1,8 @@
 {
   "provider": "claudeAgent",
   "status": "error",
-  "available": true,
-  "authStatus": "unauthenticated",
-  "checkedAt": "2026-05-05T14:45:46.894Z",
-  "message": "Claude is not authenticated. Run `claude auth login` and try again."
+  "available": false,
+  "authStatus": "unknown",
+  "checkedAt": "2026-05-05T16:21:50.316Z",
+  "message": "Claude Agent CLI is installed but failed to run. Timed out while running command."
 }

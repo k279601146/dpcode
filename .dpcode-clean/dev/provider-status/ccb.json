@@ -3,6 +3,6 @@
   "status": "ready",
   "available": true,
   "authStatus": "unknown",
-  "checkedAt": "2026-05-05T14:45:46.881Z",
+  "checkedAt": "2026-05-05T16:21:50.263Z",
   "message": "CCB is embedded in DPcode; provider authentication is handled by CCB runtime configuration."
 }
