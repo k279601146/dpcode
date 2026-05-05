@@ -126,6 +126,12 @@ export const ProviderCompactThreadInput = Schema.Struct({
 });
 export type ProviderCompactThreadInput = typeof ProviderCompactThreadInput.Type;
 
+export const ProviderStopBackgroundTaskInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: TrimmedNonEmptyString,
+});
+export type ProviderStopBackgroundTaskInput = typeof ProviderStopBackgroundTaskInput.Type;
+
 export const ProviderRespondToRequestInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,

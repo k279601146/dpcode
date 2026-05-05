@@ -120,6 +120,7 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         <MessagesTimeline
           key={activeThreadId}
+          activeThreadId={activeThreadId}
           hasMessages={hasMessages}
           isWorking={isWorking}
           activeTurnId={activeTurnId ?? null}

@@ -74,7 +74,7 @@ import {
   ProviderReadPluginInput,
   ProviderListSkillsInput,
 } from "./providerDiscovery";
-import { ProviderCompactThreadInput } from "./provider";
+import { ProviderCompactThreadInput, ProviderStopBackgroundTaskInput } from "./provider";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
@@ -134,6 +134,7 @@ export const WS_METHODS = {
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
   providerCompactThread: "provider.compactThread",
+  providerStopBackgroundTask: "provider.stopBackgroundTask",
   providerListCommands: "provider.listCommands",
   providerListSkills: "provider.listSkills",
   providerListPlugins: "provider.listPlugins",
@@ -233,6 +234,7 @@ const WebSocketRequestBody = Schema.Union([
   // Provider discovery
   tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),
   tagRequestBody(WS_METHODS.providerCompactThread, ProviderCompactThreadInput),
+  tagRequestBody(WS_METHODS.providerStopBackgroundTask, ProviderStopBackgroundTaskInput),
   tagRequestBody(WS_METHODS.providerListCommands, ProviderListCommandsInput),
   tagRequestBody(WS_METHODS.providerListSkills, ProviderListSkillsInput),
   tagRequestBody(WS_METHODS.providerListPlugins, ProviderListPluginsInput),

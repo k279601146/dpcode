@@ -1,8 +1,0 @@
-{
-  "provider": "claudeAgent",
-  "status": "warning",
-  "available": true,
-  "authStatus": "unknown",
-  "checkedAt": "2026-05-03T09:07:14.121Z",
-  "message": "Could not verify Claude authentication status. Timed out while running command."
-}

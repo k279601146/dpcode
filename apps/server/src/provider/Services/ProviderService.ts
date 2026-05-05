@@ -24,6 +24,7 @@ import type {
   ProviderSteerTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   ThreadId,
   ProviderTurnStartResult,
@@ -103,6 +104,13 @@ export interface ProviderServiceShape {
    */
   readonly stopSession: (
     input: ProviderStopSessionInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Stop a provider-native background task while keeping the session alive.
+   */
+  readonly stopBackgroundTask?: (
+    input: ProviderStopBackgroundTaskInput,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**

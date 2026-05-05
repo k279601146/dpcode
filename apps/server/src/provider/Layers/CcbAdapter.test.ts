@@ -577,6 +577,113 @@ layer(permissionModeBridge)("CcbAdapterLive permission mode switching", (it) => 
 layer(
   makeFakeBridge([
     {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "I will start the dev server." },
+          {
+            type: "tool_use",
+            id: "tool-ps-dev",
+            name: "PowerShell",
+            input: { command: "bun run dev" },
+          },
+        ],
+      },
+    },
+    {
+      type: "progress",
+      parentToolUseID: "tool-ps-dev",
+      data: {
+        type: "powershell_progress",
+        taskId: "b3xjw02hm",
+        output: "- Local:         http://localhost:3000\n",
+        fullOutput: "$ next dev\n- Local:         http://localhost:3000\n",
+        elapsedTimeSeconds: 3,
+      },
+    },
+    {
+      type: "user",
+      toolUseResult: {
+        backgroundTaskId: "b3xjw02hm",
+        assistantAutoBackgrounded: false,
+      },
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-ps-dev",
+            content:
+              "Command running in background with ID: b3xjw02hm. Output is being written to: C:\\Temp\\b3xjw02hm.output",
+          },
+        ],
+      },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+    },
+  ]),
+)("CcbAdapterLive PowerShell background progress", (it) => {
+  it.effect("emits background task metadata as soon as PowerShell progress arrives", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CcbAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "content.delta" ||
+            event.type === "item.started" ||
+            event.type === "tool.progress" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkDetach,
+      );
+      const threadId = ThreadId.makeUnsafe("thread-ccb-powershell-progress-test");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: "ccb",
+        cwd: "D:\\workkaifa\\testcode\\t3test",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "run dev",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const assistantIndex = events.findIndex((event) => event.type === "content.delta");
+      const toolIndex = events.findIndex((event) => event.type === "item.started");
+      assert.ok(assistantIndex >= 0 && toolIndex > assistantIndex);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.backgroundTaskId === "b3xjw02hm" &&
+            event.payload.status === "running" &&
+            event.payload.command === "bun run dev" &&
+            event.payload.cwd === "D:\\workkaifa\\testcode\\t3test" &&
+            event.payload.urls?.includes("http://localhost:3000"),
+        ),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.backgroundTaskId === "b3xjw02hm" &&
+            event.payload.outputPath === "C:\\Temp\\b3xjw02hm.output",
+        ),
+      );
+    }),
+  );
+});
+
+layer(
+  makeFakeBridge([
+    {
       type: "stream_event",
       event: {
         type: "content_block_delta",
@@ -1090,6 +1197,15 @@ layer(
       tool_use_id: "tool-bash-1",
       tool_name: "Bash",
       elapsed_time_seconds: 1.5,
+      task_id: "br6v17vbx",
+      data: {
+        command: "bun run dev",
+        cwd: "D:\\workkaifa\\testcode\\t3test",
+        outputPath:
+          "C:\\Users\\Administrator\\AppData\\Local\\Temp\\claude\\t3test\\tasks\\br6v17vbx.output",
+        fullOutput:
+          "Next.js 16.2.4\n- Local:         http://localhost:3000\n- Network:       http://198.18.2.160:3000",
+      },
     },
     {
       type: "tool_use_summary",
@@ -1188,7 +1304,15 @@ layer(
             event.payload.summary === "Subtask done",
         ),
       );
-      assert.ok(events.some((event) => event.type === "tool.progress"));
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.backgroundTaskId === "br6v17vbx" &&
+            event.payload.command === "bun run dev" &&
+            event.payload.urls?.includes("http://localhost:3000"),
+        ),
+      );
       assert.ok(events.some((event) => event.type === "tool.summary"));
       assert.ok(events.some((event) => event.type === "auth.status"));
       assert.ok(
@@ -1571,61 +1695,107 @@ layer(compactBridge)("CcbAdapterLive compact", (it) => {
   );
 });
 
+const workspaceContextCreateSession = vi.fn(async () => ({
+  sessionId: "ccb-session-workspace-context",
+  async *submitMessage() {
+    yield { type: "result", subtype: "success", is_error: false };
+  },
+  interrupt: vi.fn(),
+  resetAbortController: vi.fn(),
+  getAbortSignal: () => new AbortController().signal,
+  getMessages: () => [],
+  setModel: vi.fn(),
+}));
+
 layer({
   bridgeModule: {
-    createDpcodeCcbSession: vi.fn(async () => ({
-      sessionId: "ccb-session-discovery",
-      async *submitMessage() {
-        yield { type: "result", subtype: "success", is_error: false };
-      },
-      interrupt: vi.fn(),
-      resetAbortController: vi.fn(),
-      getAbortSignal: () => new AbortController().signal,
-      getMessages: () => [],
-      setModel: vi.fn(),
-    })),
-    listDpcodeCcbCommands: vi.fn(async () => [
-      { name: "compact", description: "Compact context" },
-      { name: "review" },
-    ]),
-    listDpcodeCcbSkills: vi.fn(async () => [
-      {
-        name: "verify",
-        description: "Run focused verification",
-        path: "ccb://bundled/verify",
-        enabled: true,
-        scope: "bundled",
-        displayName: "Verify",
-        shortDescription: "Run focused verification",
-      },
-    ]),
-    listDpcodeCcbAgents: vi.fn(async () => [
-      {
-        name: "review",
-        displayName: "Review",
-        description: "Review changes",
-        model: "sonnet",
-      },
-    ]),
-    listDpcodeCcbMcpStatus: vi.fn(async () => ({
-      servers: [{ name: "filesystem", transport: "stdio", scope: "project", enabled: true }],
-      errors: [],
-    })),
+    createDpcodeCcbSession: workspaceContextCreateSession,
   },
+})("CcbAdapterLive workspace context", (it) => {
+  it.effect("passes the active workspace cwd into the CCB session context prompt", () =>
+    Effect.gen(function* () {
+      workspaceContextCreateSession.mockClear();
+      const adapter = yield* CcbAdapter;
+      const cwd = "D:\\workkaifa\\testcode\\t3test";
+
+      yield* adapter.startSession({
+        threadId: ThreadId.makeUnsafe("thread-ccb-workspace-context-test"),
+        provider: "ccb",
+        cwd,
+        runtimeMode: "full-access",
+      });
+
+      const input = workspaceContextCreateSession.mock.calls[0]?.[0] as
+        | { cwd?: string; appendSystemPrompt?: string }
+        | undefined;
+      assert.equal(input?.cwd, cwd);
+      assert.equal((input?.appendSystemPrompt ?? "").includes(cwd), true);
+    }),
+  );
+});
+
+const discoveryBridgeModule = {
+  createDpcodeCcbSession: vi.fn(async () => ({
+    sessionId: "ccb-session-discovery",
+    async *submitMessage() {
+      yield { type: "result", subtype: "success", is_error: false };
+    },
+    interrupt: vi.fn(),
+    resetAbortController: vi.fn(),
+    getAbortSignal: () => new AbortController().signal,
+    getMessages: () => [],
+    setModel: vi.fn(),
+  })),
+  listDpcodeCcbCommands: vi.fn(async () => [
+    { name: "compact", description: "Compact context" },
+    { name: "review" },
+  ]),
+  listDpcodeCcbSkills: vi.fn(async () => [
+    {
+      name: "verify",
+      description: "Run focused verification",
+      path: "ccb://bundled/verify",
+      enabled: true,
+      scope: "bundled",
+      displayName: "Verify",
+      shortDescription: "Run focused verification",
+    },
+  ]),
+  listDpcodeCcbAgents: vi.fn(async () => [
+    {
+      name: "review",
+      displayName: "Review",
+      description: "Review changes",
+      model: "sonnet",
+    },
+  ]),
+  listDpcodeCcbMcpStatus: vi.fn(async () => ({
+    servers: [{ name: "filesystem", transport: "stdio", scope: "project", enabled: true }],
+    errors: [],
+  })),
+};
+
+layer({
+  bridgeModule: discoveryBridgeModule,
 })("CcbAdapterLive discovery", (it) => {
   it.effect("lists CCB native commands and skills from the bridge", () =>
     Effect.gen(function* () {
+      discoveryBridgeModule.listDpcodeCcbAgents.mockClear();
       const adapter = yield* CcbAdapter;
+      const cwd = "D:\\workkaifa\\testcode\\t3test";
 
       const commands = yield* adapter.listCommands!({
         provider: "ccb",
-        cwd: process.cwd(),
+        cwd,
       });
       const skills = yield* adapter.listSkills!({
         provider: "ccb",
-        cwd: process.cwd(),
+        cwd,
       });
-      const agents = yield* adapter.listAgents!();
+      const agents = yield* adapter.listAgents!({
+        provider: "ccb",
+        cwd,
+      });
       const capabilities = yield* adapter.getComposerCapabilities!();
 
       assert.deepEqual(
@@ -1638,14 +1808,17 @@ layer({
       assert.equal(agents.agents[0]?.name, "review");
       assert.equal(agents.agents[0]?.displayName, "Review");
       assert.equal(agents.agents[0]?.model, "sonnet");
+      assert.equal(discoveryBridgeModule.listDpcodeCcbAgents.mock.calls[0]?.[0], cwd);
       assert.equal(capabilities.supportsSkillDiscovery, true);
     }),
   );
 
   it.effect("emits CCB MCP status without blocking session startup", () =>
     Effect.gen(function* () {
+      discoveryBridgeModule.listDpcodeCcbMcpStatus.mockClear();
       const adapter = yield* CcbAdapter;
       const threadId = ThreadId.makeUnsafe("thread-ccb-mcp-status-test");
+      const cwd = "D:\\workkaifa\\testcode\\t3test";
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.type === "session.started" || event.type === "mcp.status.updated"),
         Stream.take(2),
@@ -1656,12 +1829,13 @@ layer({
       yield* adapter.startSession({
         threadId,
         provider: "ccb",
-        cwd: process.cwd(),
+        cwd,
         runtimeMode: "full-access",
       });
 
       const events = Array.from(yield* Fiber.join(eventsFiber));
       assert.ok(events.some((event) => event.type === "session.started"));
+      assert.equal(discoveryBridgeModule.listDpcodeCcbMcpStatus.mock.calls[0]?.[0], cwd);
       assert.ok(
         events.some(
           (event) =>

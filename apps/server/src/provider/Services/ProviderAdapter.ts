@@ -14,6 +14,7 @@ import type {
   ProviderForkThreadInput,
   ProviderForkThreadResult,
   ProviderKind,
+  ProviderListAgentsInput,
   ProviderListAgentsResult,
   ProviderListCommandsInput,
   ProviderListCommandsResult,
@@ -172,6 +173,14 @@ export interface ProviderAdapterShape<TError> {
   readonly compactThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
+   * Stop a provider-native background task without stopping the whole session.
+   */
+  readonly stopBackgroundTask?: (
+    threadId: ThreadId,
+    taskId: string,
+  ) => Effect.Effect<void, TError>;
+
+  /**
    * Fork one provider thread into another persisted thread cursor when supported.
    *
    * Adapters may omit this to signal that the caller should fall back to
@@ -234,7 +243,9 @@ export interface ProviderAdapterShape<TError> {
   /**
    * List agents/subagents directly from the provider runtime when supported.
    */
-  readonly listAgents?: () => Effect.Effect<ProviderListAgentsResult, TError>;
+  readonly listAgents?: (
+    input: ProviderListAgentsInput,
+  ) => Effect.Effect<ProviderListAgentsResult, TError>;
 
   /**
    * Transcribe one captured voice clip into plain text when supported.

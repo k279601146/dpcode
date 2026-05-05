@@ -965,6 +965,90 @@ describe("deriveWorkLogEntries", () => {
     ]);
   });
 
+  it("does not treat read-only tool file paths as changed files", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "read-tool",
+        kind: "tool.completed",
+        summary: "Read file",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Read file",
+          data: {
+            operation: "read",
+            filePath: "package.json",
+            input: { filePath: "package.json" },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry).toMatchObject({
+      itemType: "dynamic_tool_call",
+      requestKind: "file-read",
+      toolTitle: "Read file",
+      detail: "package.json",
+    });
+    expect(entry?.changedFiles).toBeUndefined();
+  });
+
+  it("extracts provider background task metadata for dev server cards", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "background-task",
+        kind: "tool.updated",
+        summary: "Background task",
+        payload: {
+          itemType: "command_execution",
+          title: "Background task",
+          data: {
+            backgroundTaskId: "br6v17vbx",
+            command: "bun run dev",
+            cwd: "D:\\workkaifa\\testcode\\t3test",
+            outputPath: "C:\\Temp\\br6v17vbx.output",
+            urls: ["http://localhost:3000"],
+            fullOutput: "Ready at http://localhost:3000",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.backgroundTask).toEqual({
+      taskId: "br6v17vbx",
+      command: "bun run dev",
+      cwd: "D:\\workkaifa\\testcode\\t3test",
+      outputPath: "C:\\Temp\\br6v17vbx.output",
+      urls: ["http://localhost:3000"],
+      output: "Ready at http://localhost:3000",
+    });
+  });
+
+  it("extracts tool output for expandable work log rows", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "read-output",
+        kind: "tool.completed",
+        summary: "Read file",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Read file",
+          data: {
+            operation: "read",
+            filePath: "package.json",
+            output: '{ "scripts": { "dev": "next dev" } }',
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.toolOutput).toEqual({
+      text: '{ "scripts": { "dev": "next dev" } }',
+    });
+  });
+
   it("collapses repeated lifecycle updates for the same tool call into one entry", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

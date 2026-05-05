@@ -2167,6 +2167,16 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return yield* providerService.compactThread(body);
       }
 
+      case WS_METHODS.providerStopBackgroundTask: {
+        const body = stripRequestTag(request.body);
+        if (!providerService.stopBackgroundTask) {
+          return yield* Effect.fail(
+            new RouteRequestError({ message: "Provider background task stop is unavailable." }),
+          );
+        }
+        return yield* providerService.stopBackgroundTask(body);
+      }
+
       case WS_METHODS.providerListCommands: {
         const body = stripRequestTag(request.body);
         return yield* providerDiscoveryService.listCommands(body);

@@ -1404,14 +1404,39 @@ export default function ChatView({
       binaryPath: settings.openCodeBinaryPath || null,
     }),
   );
+  const activeProviderDiscoveryCwd = resolveThreadBranchSourceCwd({
+    projectCwd: activeProject?.cwd ?? null,
+    worktreePath: resolvedThreadWorktreePath,
+  });
   const claudeDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({ provider: "claudeAgent" }),
+    providerAgentsQueryOptions({
+      provider: "claudeAgent",
+      cwd: activeProviderDiscoveryCwd,
+      threadId: activeThreadId,
+    }),
   );
   const ccbDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({ provider: "ccb", enabled: selectedProvider === "ccb" }),
+    providerAgentsQueryOptions({
+      provider: "ccb",
+      cwd: activeProviderDiscoveryCwd,
+      threadId: activeThreadId,
+      enabled: selectedProvider === "ccb",
+    }),
   );
-  const codexDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "codex" }));
-  const openCodeDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "opencode" }));
+  const codexDynamicAgentsQuery = useQuery(
+    providerAgentsQueryOptions({
+      provider: "codex",
+      cwd: activeProviderDiscoveryCwd,
+      threadId: activeThreadId,
+    }),
+  );
+  const openCodeDynamicAgentsQuery = useQuery(
+    providerAgentsQueryOptions({
+      provider: "opencode",
+      cwd: activeProviderDiscoveryCwd,
+      threadId: activeThreadId,
+    }),
+  );
   const modelOptionsByProvider = useMemo(() => {
     const staticOptions: Record<ProviderKind, ReturnType<typeof getAppModelOptions>> = {
       ccb: getAppModelOptions(

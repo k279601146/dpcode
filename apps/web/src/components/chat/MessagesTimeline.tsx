@@ -97,6 +97,7 @@ import {
 } from "../../lib/subagentPresentation";
 import { RiRobot3Line } from "react-icons/ri";
 import { deriveUserMessagePreviewState } from "./userMessagePreview";
+import { readNativeApi } from "~/nativeApi";
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
 const MAX_VISIBLE_INLINE_TOOL_ENTRIES = 4;
@@ -172,6 +173,7 @@ function basename(value: string): string {
 }
 
 interface MessagesTimelineProps {
+  activeThreadId?: string;
   hasMessages: boolean;
   isWorking: boolean;
   activeTurnInProgress: boolean;
@@ -213,6 +215,7 @@ interface MessagesTimelineProps {
 }
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  activeThreadId = "",
   hasMessages,
   isWorking,
   activeTurnInProgress,
@@ -439,6 +442,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   <SimpleWorkEntryRow
                     key={`work-row:${workEntry.id}`}
                     workEntry={workEntry}
+                    activeThreadId={activeThreadId}
                     chatMetaFontSizePx={appTypographyScale.chatMetaPx}
                     textFontSizePx={appTypographyScale.uiSmPx}
                     density={prefersCompactWorkEntryRow(workEntry) ? "compact" : "default"}
@@ -649,12 +653,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             inlineToolGroupId !== null
               ? (expandedWorkGroupsState[inlineToolGroupId] ?? false)
               : false;
-          const visibleInlineToolEntries =
-            inlineToolExpanded || inlineToolEntries.length <= MAX_VISIBLE_INLINE_TOOL_ENTRIES
-              ? inlineToolEntries
-              : activeTurnInProgress
-                ? inlineToolEntries.slice(-MAX_VISIBLE_INLINE_TOOL_ENTRIES)
-                : inlineToolEntries.slice(0, MAX_VISIBLE_INLINE_TOOL_ENTRIES);
+          const visibleInlineToolEntries = inlineToolExpanded
+            ? inlineToolEntries
+            : activeTurnInProgress
+              ? inlineToolEntries.slice(-MAX_VISIBLE_INLINE_TOOL_ENTRIES)
+              : [];
           const hiddenInlineToolCount = inlineToolEntries.length - visibleInlineToolEntries.length;
           const inlineWorkSummary =
             inlineToolEntries.length > 0
@@ -691,6 +694,46 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             hasGenericInlineFileChangeEntry && (turnSummary?.files.length ?? 0) > 0
               ? turnSummary!.files
               : [];
+          const inlineToolToggleVisible =
+            inlineToolGroupId !== null &&
+            (inlineToolExpanded || hiddenInlineToolCount > 0);
+          const inlineToolLog =
+            visibleRenderableInlineToolEntries.length > 0 || inlineToolToggleVisible ? (
+              <div className="mb-2.5">
+                {visibleRenderableInlineToolEntries.length > 0 ? (
+                  <div className="space-y-px">
+                    {visibleRenderableInlineToolEntries.map((workEntry) => (
+                      <SimpleWorkEntryRow
+                        key={`inline-tool-row:${row.message.id}:${workEntry.id}`}
+                        workEntry={workEntry}
+                        activeThreadId={activeThreadId}
+                        chatMetaFontSizePx={appTypographyScale.chatMetaPx}
+                        textFontSizePx={normalizedChatFontSizePx}
+                        density="compact"
+                        fileDiffStatByPath={fileDiffStatByPath}
+                        onOpenTurnDiff={onOpenTurnDiff}
+                        {...(onOpenThread ? { onOpenThread } : {})}
+                        {...(turnSummary?.turnId ? { turnId: turnSummary.turnId } : {})}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {inlineToolGroupId && inlineToolToggleVisible ? (
+                  <div className="py-0.5">
+                    <button
+                      type="button"
+                      className="text-muted-foreground/50 transition-colors duration-150 hover:text-foreground/72"
+                      style={{ fontSize: `${normalizedChatFontSizePx}px` }}
+                      onClick={() => handleToggleWorkGroup(inlineToolGroupId)}
+                    >
+                      {inlineToolExpanded
+                        ? "Show less"
+                        : `Show previous ${hiddenInlineToolCount} tool calls`}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null;
           const assistantMeta = row.message.streaming ? (
             nowIso ? (
               [
@@ -748,40 +791,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                     style={chatTypographyStyle}
                   />
                 </div>
-                {visibleRenderableInlineToolEntries.length > 0 && (
-                  <div className="mt-2.5">
-                    <div className="space-y-px">
-                      {visibleRenderableInlineToolEntries.map((workEntry) => (
-                        <SimpleWorkEntryRow
-                          key={`inline-tool-row:${row.message.id}:${workEntry.id}`}
-                          workEntry={workEntry}
-                          chatMetaFontSizePx={appTypographyScale.chatMetaPx}
-                          textFontSizePx={normalizedChatFontSizePx}
-                          density="compact"
-                          fileDiffStatByPath={fileDiffStatByPath}
-                          onOpenTurnDiff={onOpenTurnDiff}
-                          {...(onOpenThread ? { onOpenThread } : {})}
-                          {...(turnSummary?.turnId ? { turnId: turnSummary.turnId } : {})}
-                        />
-                      ))}
-                    </div>
-                    {inlineToolGroupId &&
-                      inlineToolEntries.length > MAX_VISIBLE_INLINE_TOOL_ENTRIES && (
-                        <div className="py-0.5">
-                          <button
-                            type="button"
-                            className="text-muted-foreground/50 transition-colors duration-150 hover:text-foreground/72"
-                            style={{ fontSize: `${normalizedChatFontSizePx}px` }}
-                            onClick={() => handleToggleWorkGroup(inlineToolGroupId)}
-                          >
-                            {inlineToolExpanded
-                              ? "Show less"
-                              : `+${hiddenInlineToolCount} more tool calls`}
-                          </button>
-                        </div>
-                      )}
-                  </div>
-                )}
+                {inlineToolLog ? <div className="mt-2.5">{inlineToolLog}</div> : null}
                 {inlineEditedFilesFromTurnSummary.length > 0 && (
                   <div className="mt-2 space-y-0.5">
                     {inlineEditedFilesFromTurnSummary.map((file) => (
@@ -1618,7 +1628,7 @@ function workEntryPreview(
     if (filePath) return basename(filePath);
 
     // For file-related entries, the heading alone is enough — don't show raw JSON
-    if (isFileRelated) return null;
+    if (isFileRelated) return basename(workEntry.detail);
 
     // For other entries, if the detail looks like raw JSON, skip it
     const trimmedDetail = workEntry.detail.trim();
@@ -1692,8 +1702,7 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
 function isFileChangeWorkEntry(workEntry: TimelineWorkEntry): boolean {
   return (
     workEntry.requestKind === "file-change" ||
-    workEntry.itemType === "file_change" ||
-    (workEntry.changedFiles?.length ?? 0) > 0
+    workEntry.itemType === "file_change"
   );
 }
 
@@ -1782,8 +1791,31 @@ function commandTooltipContent(command: string, displayText: string) {
   );
 }
 
+function ToolOutputPanel({
+  output,
+  fontSizePx,
+  compact,
+}: {
+  output: string;
+  fontSizePx: number;
+  compact: boolean;
+}) {
+  return (
+    <pre
+      className={cn(
+        "mt-1.5 max-h-80 overflow-auto rounded-md border border-border/45 bg-muted/42 px-2.5 py-2 font-chat-code leading-5 text-foreground/76",
+        compact ? "ml-0" : "ml-7",
+      )}
+      style={{ fontSize: `${Math.max(10, fontSizePx - 2)}px` }}
+    >
+      {output}
+    </pre>
+  );
+}
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
+  activeThreadId: string;
   chatMetaFontSizePx: number;
   textFontSizePx?: number;
   density?: "default" | "compact";
@@ -1794,6 +1826,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 }) {
   const {
     workEntry,
+    activeThreadId,
     chatMetaFontSizePx,
     textFontSizePx = chatMetaFontSizePx,
     density = "default",
@@ -1818,6 +1851,33 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const hoverText = workEntry.command ?? displayText;
   const changedFiles = workEntry.changedFiles ?? [];
   const showEditedRows = isFileChangeWorkEntry(workEntry) && changedFiles.length > 0;
+  const backgroundTask = workEntry.backgroundTask;
+  const outputText = workEntry.toolOutput?.text ?? backgroundTask?.output;
+  const [outputExpanded, setOutputExpanded] = useState(false);
+  const toggleOutputExpanded = useCallback(() => {
+    if (!outputText) return;
+    setOutputExpanded((expanded) => !expanded);
+  }, [outputText]);
+  const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
+  const backgroundTaskRunning =
+    Boolean(backgroundTask) &&
+    !["completed", "failed", "stopped", "cancelled", "canceled"].includes(
+      backgroundTask?.status?.toLowerCase() ?? "",
+    );
+  const stopBackgroundTask = useCallback(async () => {
+    if (!backgroundTask || stoppingTaskId || !activeThreadId) return;
+    const api = readNativeApi();
+    if (!api?.provider.stopBackgroundTask) return;
+    setStoppingTaskId(backgroundTask.taskId);
+    try {
+      await api.provider.stopBackgroundTask({
+        threadId: ThreadId.makeUnsafe(activeThreadId),
+        taskId: backgroundTask.taskId,
+      });
+    } finally {
+      setStoppingTaskId(null);
+    }
+  }, [activeThreadId, backgroundTask, stoppingTaskId]);
   const showSubagentRows =
     workEntry.itemType === "collab_agent_tool_call" &&
     ((workEntry.subagents?.length ?? 0) > 0 || Boolean(workEntry.subagentAction));
@@ -1834,7 +1894,103 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 
   return (
     <div className={cn(compact ? "py-0.5" : "rounded-lg py-1")}>
-      {showEditedRows ? (
+      {backgroundTask ? (
+        <div
+          className={cn(
+            "space-y-2 rounded-md border border-border/55 bg-background/72 px-3 py-2",
+            outputText ? "cursor-pointer transition-colors hover:bg-background/82" : "",
+            compact ? "my-1" : "",
+          )}
+          role={outputText ? "button" : undefined}
+          tabIndex={outputText ? 0 : undefined}
+          title={outputText ? "Click to expand or collapse output" : undefined}
+          onClick={toggleOutputExpanded}
+          onKeyDown={(event) => {
+            if (!outputText || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            toggleOutputExpanded();
+          }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-muted-foreground/52">
+              <TerminalIcon className="size-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <p
+                  className="truncate font-medium text-foreground/78"
+                  style={{ fontSize: `${rowFontSizePx}px` }}
+                  title={backgroundTask.command ?? displayText}
+                >
+                  {backgroundTask.command ?? displayText}
+                </p>
+                <span
+                  className="shrink-0 rounded-full border border-border/45 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.1em] text-muted-foreground/58"
+                  title={backgroundTask.status ?? "running"}
+                >
+                  {backgroundTaskRunning ? "Running" : (backgroundTask.status ?? "Task")}
+                </span>
+              </div>
+              {backgroundTask.cwd ? (
+                <p
+                  className="truncate pt-0.5 text-muted-foreground/42"
+                  style={{ fontSize: `${Math.max(10, rowFontSizePx - 1)}px` }}
+                  title={backgroundTask.cwd}
+                >
+                  {backgroundTask.cwd}
+                </p>
+              ) : null}
+              {(backgroundTask.urls?.length ?? 0) > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {backgroundTask.urls!.map((url) => (
+                    <a
+                      key={`${workEntry.id}:${url}`}
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="truncate rounded border border-border/45 bg-background/80 px-1.5 py-0.5 text-[11px] text-[var(--color-token-text-link-foreground)] hover:underline"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {url}
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+              {backgroundTask.outputPath ? (
+                <p
+                  className="mt-1 truncate font-chat-code text-muted-foreground/36"
+                  style={{ fontSize: `${Math.max(10, rowFontSizePx - 2)}px` }}
+                  title={backgroundTask.outputPath}
+                >
+                  {backgroundTask.outputPath}
+                </p>
+              ) : null}
+              {outputExpanded && outputText ? (
+                <ToolOutputPanel
+                  output={outputText}
+                  fontSizePx={rowFontSizePx}
+                  compact={compact}
+                />
+              ) : null}
+            </div>
+            {backgroundTaskRunning ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0 px-2 text-[11px]"
+                disabled={!activeThreadId || stoppingTaskId === backgroundTask.taskId}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void stopBackgroundTask();
+                }}
+              >
+                {stoppingTaskId === backgroundTask.taskId ? "Stopping" : "Stop"}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : showEditedRows ? (
         <div className="space-y-0.5">
           {changedFiles.map((changedFilePath) => {
             const changedFileStat = fileDiffStatByPath?.get(changedFilePath);
@@ -2038,9 +2194,18 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             <div
               className={cn(
                 "flex items-center transition-[opacity,translate] duration-200",
+                outputText ? "cursor-pointer rounded-sm hover:bg-muted/24" : "",
                 compact ? "gap-1.5" : "gap-2",
               )}
               title={hoverText}
+              role={outputText ? "button" : undefined}
+              tabIndex={outputText ? 0 : undefined}
+              onClick={toggleOutputExpanded}
+              onKeyDown={(event) => {
+                if (!outputText || (event.key !== "Enter" && event.key !== " ")) return;
+                event.preventDefault();
+                toggleOutputExpanded();
+              }}
             >
               {showIconLeft && (
                 <span
@@ -2109,16 +2274,38 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           );
 
           if (!workEntry.command) {
-            return rowContent;
+            return (
+              <>
+                {rowContent}
+                {outputExpanded && outputText ? (
+                  <ToolOutputPanel
+                    output={outputText}
+                    fontSizePx={rowFontSizePx}
+                    compact={compact}
+                  />
+                ) : null}
+              </>
+            );
           }
 
           return (
-            <Tooltip>
-              <TooltipTrigger render={rowContent} />
-              <TooltipPopup side="top" align="start" className="max-w-96 whitespace-normal">
-                {commandTooltipContent(workEntry.command, displayText)}
-              </TooltipPopup>
-            </Tooltip>
+            <>
+              <Tooltip>
+                <TooltipTrigger render={rowContent} />
+                <TooltipPopup side="top" align="start" className="max-w-96 whitespace-normal">
+                  {commandTooltipContent(workEntry.command, displayText)}
+                </TooltipPopup>
+              </Tooltip>
+              {outputText ? (
+                outputExpanded ? (
+                  <ToolOutputPanel
+                    output={outputText}
+                    fontSizePx={rowFontSizePx}
+                    compact={compact}
+                  />
+                ) : null
+              ) : null}
+            </>
           );
         })()
       )}

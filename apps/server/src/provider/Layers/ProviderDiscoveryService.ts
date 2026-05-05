@@ -173,7 +173,7 @@ const make = Effect.gen(function* () {
           cached: false,
         };
       }
-      return yield* adapter.listAgents();
+      return yield* adapter.listAgents(parsed);
     });
 
   return {

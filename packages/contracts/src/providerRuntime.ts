@@ -464,6 +464,10 @@ const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  command: Schema.optional(TrimmedNonEmptyStringSchema),
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  outputPath: Schema.optional(TrimmedNonEmptyStringSchema),
+  urls: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
@@ -473,6 +477,12 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  command: Schema.optional(TrimmedNonEmptyStringSchema),
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  output: Schema.optional(Schema.String),
+  fullOutput: Schema.optional(Schema.String),
+  outputPath: Schema.optional(TrimmedNonEmptyStringSchema),
+  urls: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
@@ -514,6 +524,14 @@ const ToolProgressPayload = Schema.Struct({
   toolName: Schema.optional(TrimmedNonEmptyStringSchema),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   elapsedSeconds: Schema.optional(Schema.Number),
+  backgroundTaskId: Schema.optional(TrimmedNonEmptyStringSchema),
+  status: Schema.optional(TrimmedNonEmptyStringSchema),
+  command: Schema.optional(TrimmedNonEmptyStringSchema),
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  output: Schema.optional(Schema.String),
+  fullOutput: Schema.optional(Schema.String),
+  outputPath: Schema.optional(TrimmedNonEmptyStringSchema),
+  urls: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type ToolProgressPayload = typeof ToolProgressPayload.Type;
 

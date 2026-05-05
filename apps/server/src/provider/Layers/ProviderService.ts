@@ -23,6 +23,7 @@ import {
   ProviderStartReviewInput,
   ProviderSteerTurnInput,
   ProviderSessionStartInput,
+  ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   ProviderStartOptions,
   type ProviderRuntimeEvent,
@@ -699,6 +700,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         yield* routed.adapter.respondToUserInput(routed.threadId, input.requestId, input.answers);
       });
 
+    const stopBackgroundTask: NonNullable<ProviderServiceShape["stopBackgroundTask"]> = (rawInput) =>
+      Effect.gen(function* () {
+        const input = yield* decodeInputOrValidationError({
+          operation: "ProviderService.stopBackgroundTask",
+          schema: ProviderStopBackgroundTaskInput,
+          payload: rawInput,
+        });
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.stopBackgroundTask",
+          allowRecovery: true,
+        });
+        if (!routed.adapter.stopBackgroundTask) {
+          return yield* toValidationError(
+            "ProviderService.stopBackgroundTask",
+            `Provider '${routed.adapter.provider}' does not support stopping background tasks.`,
+          );
+        }
+        yield* routed.adapter.stopBackgroundTask(routed.threadId, input.taskId);
+        yield* analytics.record("provider.background_task.stopped", {
+          provider: routed.adapter.provider,
+        });
+      });
+
     const stopSession: ProviderServiceShape["stopSession"] = (rawInput) =>
       Effect.gen(function* () {
         const input = yield* decodeInputOrValidationError({
@@ -983,6 +1008,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       interruptTurn,
       respondToRequest,
       respondToUserInput,
+      stopBackgroundTask,
       stopSession,
       stopRuntimeSession,
       clearSessionResumeCursor,

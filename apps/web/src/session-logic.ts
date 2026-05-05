@@ -50,6 +50,20 @@ export interface WorkLogEntry {
   toolName?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  backgroundTask?: {
+    taskId: string;
+    status?: string;
+    command?: string;
+    cwd?: string;
+    outputPath?: string;
+    urls?: ReadonlyArray<string>;
+    output?: string;
+  };
+  toolOutput?: {
+    text: string;
+    outputPath?: string;
+    urls?: ReadonlyArray<string>;
+  };
   subagents?: ReadonlyArray<WorkLogSubagent>;
   subagentAction?: WorkLogSubagentAction;
 }
@@ -693,7 +707,6 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       ? (activity.payload as Record<string, unknown>)
       : null;
   const command = extractToolCommand(payload);
-  const changedFiles = extractChangedFiles(payload);
   const title = extractToolTitle(payload);
   const toolName = extractToolName(payload);
   const entry: DerivedWorkLogEntry = {
@@ -706,10 +719,20 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
+  const changedFiles = extractChangedFiles(payload, { itemType, requestKind });
+  const backgroundTask = extractBackgroundTask(payload);
+  const toolOutput = extractToolOutput(payload);
   if (payload && typeof payload.detail === "string" && payload.detail.length > 0) {
     const detail = stripTrailingExitCode(payload.detail).output;
     if (detail) {
       entry.detail = detail;
+    }
+  }
+  if (!entry.detail && requestKind === "file-read") {
+    const data = asRecord(payload?.data);
+    const readPath = asTrimmedString(data?.filePath ?? data?.path ?? asRecord(data?.input)?.filePath);
+    if (readPath) {
+      entry.detail = readPath;
     }
   }
   if (command) {
@@ -723,6 +746,12 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (requestKind) {
     entry.requestKind = requestKind;
+  }
+  if (backgroundTask) {
+    entry.backgroundTask = backgroundTask;
+  }
+  if (toolOutput) {
+    entry.toolOutput = toolOutput;
   }
   const subagents = extractCollabSubagents(payload);
   if (subagents.length > 0) {
@@ -803,6 +832,8 @@ function mergeDerivedWorkLogEntries(
   const subagentAction = next.subagentAction ?? previous.subagentAction;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolName = next.toolName ?? previous.toolName;
+  const backgroundTask = mergeBackgroundTask(previous.backgroundTask, next.backgroundTask);
+  const toolOutput = mergeToolOutput(previous.toolOutput, next.toolOutput);
   return {
     ...previous,
     ...next,
@@ -816,6 +847,40 @@ function mergeDerivedWorkLogEntries(
     ...(subagentAction ? { subagentAction } : {}),
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolName ? { toolName } : {}),
+    ...(backgroundTask ? { backgroundTask } : {}),
+    ...(toolOutput ? { toolOutput } : {}),
+  };
+}
+
+function mergeToolOutput(
+  previous: WorkLogEntry["toolOutput"],
+  next: WorkLogEntry["toolOutput"],
+): WorkLogEntry["toolOutput"] | undefined {
+  if (!previous) return next;
+  if (!next) return previous;
+  const urls = [...new Set([...(previous.urls ?? []), ...(next.urls ?? [])])];
+  return {
+    ...previous,
+    ...next,
+    ...(previous.outputPath && !next.outputPath ? { outputPath: previous.outputPath } : {}),
+    ...(urls.length > 0 ? { urls } : {}),
+  };
+}
+
+function mergeBackgroundTask(
+  previous: WorkLogEntry["backgroundTask"],
+  next: WorkLogEntry["backgroundTask"],
+): WorkLogEntry["backgroundTask"] | undefined {
+  if (!previous) return next;
+  if (!next) return previous;
+  const urls = [...new Set([...(previous.urls ?? []), ...(next.urls ?? [])])];
+  return {
+    ...previous,
+    ...next,
+    ...(previous.command && !next.command ? { command: previous.command } : {}),
+    ...(previous.cwd && !next.cwd ? { cwd: previous.cwd } : {}),
+    ...(previous.outputPath && !next.outputPath ? { outputPath: previous.outputPath } : {}),
+    ...(urls.length > 0 ? { urls } : {}),
   };
 }
 
@@ -840,6 +905,7 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
   const itemType = entry.itemType ?? "";
   const requestKind = entry.requestKind ?? "";
   const toolName = entry.toolName ?? "";
+  const backgroundTaskId = entry.backgroundTask?.taskId ?? "";
   const command = normalizeCompactToolLabel(entry.command ?? "");
   const changedFiles =
     entry.changedFiles && entry.changedFiles.length > 0 ? entry.changedFiles.join("|") : "";
@@ -849,12 +915,13 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
     itemType.length === 0 &&
     requestKind.length === 0 &&
     toolName.length === 0 &&
+    backgroundTaskId.length === 0 &&
     changedFiles.length === 0 &&
     detailHint.length === 0
   ) {
     return command.length > 0 ? `command-only${"\u001f"}${command}` : undefined;
   }
-  return [itemType, normalizedLabel, requestKind, toolName, changedFiles, detailHint].join(
+  return [itemType, normalizedLabel, requestKind, toolName, backgroundTaskId, changedFiles, detailHint].join(
     "\u001f",
   );
 }
@@ -1234,6 +1301,11 @@ function extractWorkLogRequestKind(
   ) {
     return payload.requestKind;
   }
+  const data = asRecord(payload?.data);
+  const operation = asTrimmedString(data?.operation ?? asRecord(data?.input)?.operation);
+  if (operation === "read") {
+    return "file-read";
+  }
   return requestKindFromRequestType(payload?.requestType) ?? undefined;
 }
 
@@ -1294,11 +1366,107 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
   }
 }
 
-function extractChangedFiles(payload: Record<string, unknown> | null): string[] {
+function extractChangedFiles(
+  payload: Record<string, unknown> | null,
+  context: Pick<WorkLogEntry, "itemType" | "requestKind">,
+): string[] {
+  if (context.itemType !== "file_change" && context.requestKind !== "file-change") {
+    return [];
+  }
   const changedFiles: string[] = [];
   const seen = new Set<string>();
   collectChangedFiles(asRecord(payload?.data), changedFiles, seen, 0);
   return changedFiles;
+}
+
+function extractStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map(asTrimmedString)
+    .filter((entry): entry is string => entry !== null);
+}
+
+function extractBackgroundTask(
+  payload: Record<string, unknown> | null,
+): WorkLogEntry["backgroundTask"] | undefined {
+  const data = asRecord(payload?.data);
+  const taskId = asTrimmedString(data?.backgroundTaskId ?? data?.taskId ?? payload?.taskId);
+  if (!taskId) {
+    return undefined;
+  }
+  const status = asTrimmedString(data?.status ?? payload?.status);
+  const command = asTrimmedString(data?.command);
+  const cwd = asTrimmedString(data?.cwd);
+  const outputPath = asTrimmedString(data?.outputPath);
+  const output =
+    asTrimmedString(data?.fullOutput) ??
+    asTrimmedString(data?.output) ??
+    asTrimmedString(payload?.detail);
+  const urls = extractStringArray(data?.urls);
+  return {
+    taskId,
+    ...(status ? { status } : {}),
+    ...(command ? { command } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(outputPath ? { outputPath } : {}),
+    ...(urls.length > 0 ? { urls } : {}),
+    ...(output ? { output } : {}),
+  };
+}
+
+function textFromUnknownOutput(value: unknown, depth = 0): string | null {
+  if (depth > 4) {
+    return null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((entry) => textFromUnknownOutput(entry, depth + 1))
+      .filter((entry): entry is string => Boolean(entry))
+      .join("");
+    return joined.trim().length > 0 ? joined : null;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  return (
+    textFromUnknownOutput(record.fullOutput, depth + 1) ??
+    textFromUnknownOutput(record.output, depth + 1) ??
+    textFromUnknownOutput(record.stdout, depth + 1) ??
+    textFromUnknownOutput(record.stderr, depth + 1) ??
+    textFromUnknownOutput(record.text, depth + 1) ??
+    textFromUnknownOutput(record.content, depth + 1) ??
+    textFromUnknownOutput(record.result, depth + 1)
+  );
+}
+
+function extractToolOutput(
+  payload: Record<string, unknown> | null,
+): WorkLogEntry["toolOutput"] | undefined {
+  const data = asRecord(payload?.data);
+  const result = data?.result;
+  const text =
+    textFromUnknownOutput(data?.fullOutput) ??
+    textFromUnknownOutput(data?.output) ??
+    textFromUnknownOutput(data?.stdout) ??
+    textFromUnknownOutput(data?.stderr) ??
+    textFromUnknownOutput(result);
+  if (!text) {
+    return undefined;
+  }
+  const outputPath = asTrimmedString(data?.outputPath);
+  const urls = extractStringArray(data?.urls);
+  return {
+    text,
+    ...(outputPath ? { outputPath } : {}),
+    ...(urls.length > 0 ? { urls } : {}),
+  };
 }
 
 function compareActivitiesByOrder(

@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 
 const PROVIDER = "ccb" as const;
 const CCB_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const CCB_BRIDGE_CACHE_VERSION = "v7";
+const CCB_BRIDGE_CACHE_VERSION = "v9";
 const SUPPORTED_CCB_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -184,6 +184,11 @@ type CcbSessionHandle = {
   getAbortSignal(): AbortSignal;
   getMessages(): readonly unknown[];
   setModel(model: string): void;
+  stopBackgroundTask?(taskId: string): Promise<{
+    taskId: string;
+    taskType: string;
+    command?: string;
+  }>;
   setPermissionMode?(mode: string): void;
 };
 
@@ -259,6 +264,54 @@ function asNumber(value: unknown): number | undefined {
 
 function trimOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function workspaceCwdForPrompt(value: unknown): string | undefined {
+  return trimOrNull(value) ?? undefined;
+}
+
+const LOCAL_DEV_URL_PATTERN =
+  /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[^\]]+\]|[A-Za-z0-9.-]+)(?::\d{1,5})?(?:\/[^\s"'<>)]*)?/gi;
+
+function extractUrlsFromText(...values: ReadonlyArray<unknown>): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string" || value.length === 0) {
+      continue;
+    }
+    for (const match of value.matchAll(LOCAL_DEV_URL_PATTERN)) {
+      const url = match[0]?.replace(/[.,;:]+$/, "");
+      if (!url || seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+      urls.push(url);
+    }
+  }
+  return urls.slice(0, 8);
+}
+
+function extractBackgroundOutputPathFromText(value: string): string | undefined {
+  const marker = "Output is being written to:";
+  const index = value.indexOf(marker);
+  if (index < 0) return undefined;
+  const outputPath = value.slice(index + marker.length).trim().split(/\r?\n/u)[0]?.trim();
+  return outputPath && outputPath.length > 0 ? outputPath : undefined;
+}
+
+function firstNestedString(
+  record: Record<string, unknown>,
+  keys: ReadonlyArray<string>,
+): string | undefined {
+  const data = asObject(record.data);
+  for (const key of keys) {
+    const value = asString(record[key]) ?? asString(data?.[key]);
+    if (value && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -501,6 +554,15 @@ function textLengthFromUnknown(value: unknown): number | undefined {
   );
 }
 
+function truncateCcbToolOutput(value: string, limit = 12_000): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function shouldExposeCcbToolOutput(itemType: CanonicalItemType, toolName: string): boolean {
+  return itemType === "command_execution" || isCcbReadOnlyToolName(toolName);
+}
+
 function ccbDisplayInput(
   itemType: CanonicalItemType,
   toolName: string,
@@ -547,15 +609,20 @@ function normalizeCcbToolResult(
     const filePath = contentRecord ? filePathFromToolInput(contentRecord) : undefined;
     const files = contentRecord ? filesFromToolInput(contentRecord) : [];
     const contentLength = textLengthFromUnknown(content);
+    const output = shouldExposeCcbToolOutput(itemType, toolName)
+      ? truncateCcbToolOutput(extractCcbTextContent(content))
+      : "";
     return {
       ...(typeof record.is_error === "boolean" ? { isError: record.is_error } : {}),
       ...(filePath ? { filePath } : {}),
       ...(files.length > 0 ? { files } : {}),
       ...(contentLength !== undefined ? { outputLength: contentLength } : {}),
+      ...(output.length > 0 ? { output } : {}),
     };
   }
   if (record.content !== undefined && Object.keys(record).length === 1) {
-    return record.content;
+    const output = truncateCcbToolOutput(extractCcbTextContent(record.content));
+    return output.length > 0 ? output : record.content;
   }
   return result;
 }
@@ -611,6 +678,12 @@ function ccbToolData(
   const filePath = filePathFromToolInput(input);
   const files = filesFromToolInput(input);
   const operation = ccbFileOperation(toolName);
+  const normalizedResult =
+    result !== undefined ? normalizeCcbToolResult(itemType, toolName, result) : undefined;
+  const output =
+    result !== undefined && shouldExposeCcbToolOutput(itemType, toolName)
+      ? truncateCcbToolOutput(extractCcbTextContent(normalizedResult ?? result))
+      : undefined;
   return {
     toolName,
     input: ccbDisplayInput(itemType, toolName, input),
@@ -618,7 +691,8 @@ function ccbToolData(
     ...(command ? { command } : {}),
     ...(filePath ? { filePath } : {}),
     ...(files.length > 0 ? { files } : {}),
-    ...(result !== undefined ? { result: normalizeCcbToolResult(itemType, toolName, result) } : {}),
+    ...(normalizedResult !== undefined ? { result: normalizedResult } : {}),
+    ...(output && output.length > 0 ? { output } : {}),
   };
 }
 
@@ -853,7 +927,7 @@ function buildCcbDpcodeSystemPrompt(input: {
   readonly languagePreference?: string;
   readonly userAppendSystemPrompt?: string;
   readonly enableWindowsCommandGuidance?: boolean;
-  readonly preferAgentTools?: boolean;
+  readonly workspaceCwd?: string;
 }): string | undefined {
   const sections: string[] = [];
   const languagePreference = input.languagePreference?.trim();
@@ -870,21 +944,22 @@ function buildCcbDpcodeSystemPrompt(input: {
     sections.push(
       [
         "# DP Code Windows command policy",
-        "This DP Code session is running on Windows. For file operations and code search, prefer CCB's native Read, Edit, Write, Glob, Grep, and related tools before falling back to shell commands.",
+        "This session is running on Windows. For file operations and code search, prefer CCB's native Read, Edit, Write, Glob, Grep, and related tools before falling back to shell commands.",
         "When a shell command is genuinely needed, prefer PowerShell-compatible commands such as Get-ChildItem, Select-String, Get-Content, Test-Path, Resolve-Path, New-Item, Remove-Item, Move-Item, and Copy-Item.",
         "Do not default to Unix-only shell commands such as ls -R, grep, cat, sed, awk, chmod, or rm unless you have verified they are available and appropriate.",
+        "When you start a background development server, inspect the latest task output or output file and report concrete local/network URLs instead of placeholder ports.",
       ].join("\n"),
     );
   }
 
-  if (input.preferAgentTools !== false) {
+  const workspaceCwd = input.workspaceCwd?.trim();
+  if (workspaceCwd) {
     sections.push(
       [
-        "# DP Code CCB agent and skill policy",
-        "For broad project analysis, multi-file investigation, planning, review, or parallelizable work, actively use CCB Agent, Skill, Task, Explore, Plan, Swarm, or Worktree tools when they are available and relevant.",
-        "If an Agent or Skill tool is available, delegate bounded exploration or planning work instead of doing every repository scan in one long shell command.",
-        "For open-ended project analysis, do not stop after reading only a root manifest. Build a compact map from targeted Glob/Grep/Read calls, use Explore for repository discovery when useful, and provide the best architecture synthesis you can without asking the user which file to inspect next unless there is a real product decision to make.",
-        "When Glob or Grep times out on a broad pattern, narrow by path, glob, type, or head_limit and continue with CCB native search/read tools rather than treating the timeout as a completed analysis.",
+        "# DP Code workspace context",
+        `The active project directory for this session is ${workspaceCwd}.`,
+        "Treat that directory as the current workspace root unless the user explicitly switches folders.",
+        "When you report the current project path or working directory, use that exact directory.",
       ].join("\n"),
     );
   }
@@ -1750,6 +1825,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               const text = asString(blockObj?.text) ?? "";
               if (text.length > 0) {
                 finalTextBlocks.push(text);
+                const textSoFar = finalTextBlocks.join("\n");
+                const delta = assistantFinalTextDelta(context, turnId, textSoFar);
+                if (delta.length > 0) {
+                  yield* emitContentDelta(context, turnId, "assistant_text", delta, raw);
+                }
               }
             } else if (blockType === "thinking") {
               const text = asString(blockObj?.thinking) ?? asString(blockObj?.text) ?? "";
@@ -1805,19 +1885,6 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           const assistantProviderItemId =
             asString(asObject(message.message)?.id) ?? asString(message.uuid);
           const finalText = finalTextBlocks.join("\n");
-          const finalDelta = assistantFinalTextDelta(context, turnId, finalText);
-          if (finalDelta.length > 0) {
-            yield* emitContentDelta(
-              context,
-              turnId,
-              "assistant_text",
-              finalDelta,
-              raw,
-              assistantProviderItemId
-                ? RuntimeItemId.makeUnsafe(assistantProviderItemId)
-                : undefined,
-            );
-          }
           yield* emitAssistantMessageCompleted(
             context,
             turnId,
@@ -1849,6 +1916,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               }
               const itemId = RuntimeItemId.makeUnsafe(providerToolUseId ?? crypto.randomUUID());
               const resultText = toolResultText(block);
+              const toolUseResult = asObject(message.toolUseResult);
+              const backgroundTaskId = asString(toolUseResult?.backgroundTaskId);
+              const backgroundOutputPath =
+                firstNestedString(toolUseResult ?? {}, ["output_path", "outputPath", "file_path", "filePath"]) ??
+                extractBackgroundOutputPathFromText(resultText);
               const tool: PendingToolItem & { readonly itemId: RuntimeItemId } = {
                 itemId,
                 itemType: stored?.itemType ?? "dynamic_tool_call",
@@ -1874,6 +1946,32 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 block.is_error === true ? "failed" : "inProgress",
                 block,
               );
+              if (backgroundTaskId) {
+                const progressStamp = yield* makeStamp();
+                const command = commandFromToolInput(tool.input);
+                const urls = extractUrlsFromText(resultText, backgroundOutputPath);
+                yield* offer({
+                  type: "tool.progress",
+                  eventId: progressStamp.eventId,
+                  provider: PROVIDER,
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: progressStamp.createdAt,
+                  payload: {
+                    ...(providerToolUseId ? { toolUseId: providerToolUseId } : {}),
+                    toolName: tool.toolName,
+                    backgroundTaskId,
+                    status: "running",
+                    summary: `task:${backgroundTaskId}`,
+                    ...(command ? { command } : {}),
+                    ...(context.session.cwd ? { cwd: context.session.cwd } : {}),
+                    ...(backgroundOutputPath ? { outputPath: backgroundOutputPath } : {}),
+                    ...(urls.length > 0 ? { urls } : {}),
+                  },
+                  raw,
+                  providerRefs: { providerThreadId: context.handle.sessionId },
+                });
+              }
               const streamKind = ccbToolResultStreamKind(tool.itemType);
               if (
                 streamKind &&
@@ -1913,6 +2011,55 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
             providerRefs: { providerThreadId: context.handle.sessionId },
           });
           return;
+        }
+
+        if (messageType === "progress") {
+          const data = asObject(message.data);
+          const progressType = asString(data?.type);
+          if (progressType === "powershell_progress") {
+            const taskId = asString(data?.taskId);
+            if (!taskId) {
+              return;
+            }
+            const stamp = yield* makeStamp();
+            const parentToolUseId = asString(message.parentToolUseID) ?? asString(message.parent_tool_use_id);
+            const stored = parentToolUseId ? context.pendingToolItems.get(parentToolUseId) : undefined;
+            const command =
+              firstNestedString(data, ["command"]) ??
+              (stored ? commandFromToolInput(stored.input) : undefined);
+            const cwd = firstNestedString(data, ["cwd"]) ?? context.session.cwd;
+            const output = firstNestedString(data, ["output", "stdout", "stderr"]);
+            const fullOutput = firstNestedString(data, ["fullOutput", "full_output"]);
+            const outputPath = firstNestedString(data, ["output_path", "outputPath", "file_path", "filePath"]);
+            const urls = extractUrlsFromText(output, fullOutput, outputPath);
+            yield* offer({
+              type: "tool.progress",
+              eventId: stamp.eventId,
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              turnId,
+              createdAt: stamp.createdAt,
+              payload: {
+                ...(parentToolUseId ? { toolUseId: parentToolUseId } : {}),
+                toolName: stored?.toolName ?? "PowerShell",
+                backgroundTaskId: taskId,
+                status: "running",
+                summary: `task:${taskId}`,
+                ...(asNumber(data?.elapsedTimeSeconds) !== undefined
+                  ? { elapsedSeconds: asNumber(data?.elapsedTimeSeconds) }
+                  : {}),
+                ...(command ? { command } : {}),
+                ...(cwd ? { cwd } : {}),
+                ...(output ? { output } : {}),
+                ...(fullOutput ? { fullOutput } : {}),
+                ...(outputPath ? { outputPath } : {}),
+                ...(urls.length > 0 ? { urls } : {}),
+              },
+              raw,
+              providerRefs: { providerThreadId: context.handle.sessionId },
+            });
+            return;
+          }
         }
 
         if (messageType === "system") {
@@ -2083,6 +2230,11 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               return;
             case "task_started": {
               const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              const command = firstNestedString(message, ["command"]);
+              const cwd = firstNestedString(message, ["cwd"]);
+              const outputPath = firstNestedString(message, ["output_path", "outputPath", "file_path", "filePath"]);
+              const output = firstNestedString(message, ["output", "fullOutput"]);
+              const urls = extractUrlsFromText(output, outputPath);
               yield* offer({
                 ...base,
                 type: "task.started",
@@ -2090,6 +2242,10 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   taskId: RuntimeTaskId.makeUnsafe(taskId),
                   ...(asString(message.description) ? { description: asString(message.description) } : {}),
                   ...(asString(message.task_type) ? { taskType: asString(message.task_type) } : {}),
+                  ...(command ? { command } : {}),
+                  ...(cwd ? { cwd } : {}),
+                  ...(outputPath ? { outputPath } : {}),
+                  ...(urls.length > 0 ? { urls } : {}),
                 },
               });
               return;
@@ -2099,6 +2255,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                 yield* emitThreadTokenUsage(context, turnId, message.usage, raw);
               }
               const taskId = asString(message.task_id) ?? asString(message.uuid) ?? crypto.randomUUID();
+              const command = firstNestedString(message, ["command"]);
+              const cwd = firstNestedString(message, ["cwd"]);
+              const output = firstNestedString(message, ["output", "stdout", "stderr"]);
+              const fullOutput = firstNestedString(message, ["fullOutput", "full_output"]);
+              const outputPath = firstNestedString(message, ["output_path", "outputPath", "file_path", "filePath"]);
+              const urls = extractUrlsFromText(output, fullOutput, outputPath);
               yield* offer({
                 ...base,
                 type: "task.progress",
@@ -2108,6 +2270,12 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
                   ...(asString(message.summary) ? { summary: asString(message.summary) } : {}),
                   ...(message.usage ? { usage: message.usage } : {}),
                   ...(asString(message.last_tool_name) ? { lastToolName: asString(message.last_tool_name) } : {}),
+                  ...(command ? { command } : {}),
+                  ...(cwd ? { cwd } : {}),
+                  ...(output ? { output } : {}),
+                  ...(fullOutput ? { fullOutput } : {}),
+                  ...(outputPath ? { outputPath } : {}),
+                  ...(urls.length > 0 ? { urls } : {}),
                 },
               });
               return;
@@ -2243,6 +2411,18 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
 
         if (messageType === "tool_progress") {
           const stamp = yield* makeStamp();
+          const backgroundTaskId = firstNestedString(message, [
+            "task_id",
+            "taskId",
+            "background_task_id",
+            "backgroundTaskId",
+          ]);
+          const command = firstNestedString(message, ["command"]);
+          const cwd = firstNestedString(message, ["cwd"]);
+          const output = firstNestedString(message, ["output", "stdout", "stderr"]);
+          const fullOutput = firstNestedString(message, ["fullOutput", "full_output"]);
+          const outputPath = firstNestedString(message, ["output_path", "outputPath", "file_path", "filePath"]);
+          const urls = extractUrlsFromText(output, fullOutput, outputPath);
           yield* offer({
             type: "tool.progress",
             eventId: stamp.eventId,
@@ -2256,7 +2436,13 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
               ...(asNumber(message.elapsed_time_seconds) !== undefined
                 ? { elapsedSeconds: asNumber(message.elapsed_time_seconds) }
                 : {}),
-              ...(asString(message.task_id) ? { summary: `task:${asString(message.task_id)}` } : {}),
+              ...(backgroundTaskId ? { backgroundTaskId, summary: `task:${backgroundTaskId}` } : {}),
+              ...(command ? { command } : {}),
+              ...(cwd ? { cwd } : {}),
+              ...(output ? { output } : {}),
+              ...(fullOutput ? { fullOutput } : {}),
+              ...(outputPath ? { outputPath } : {}),
+              ...(urls.length > 0 ? { urls } : {}),
             },
             raw,
             providerRefs: { providerThreadId: context.handle.sessionId },
@@ -2438,6 +2624,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const bridge = yield* loadBridgeModule();
         const createdAt = yield* nowIso;
         const threadId = input.threadId;
+        const sessionWorkspaceCwd = workspaceCwdForPrompt(input.cwd);
         const pendingApprovals = new Map<string, PendingApproval>();
         const runtimeMode = input.runtimeMode;
         const resumeCursor = asCcbResumeCursor(input.resumeCursor);
@@ -2446,7 +2633,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           languagePreference: ccbOptions?.languagePreference,
           userAppendSystemPrompt: ccbOptions?.appendSystemPrompt,
           enableWindowsCommandGuidance: ccbOptions?.enableWindowsCommandGuidance,
-          preferAgentTools: ccbOptions?.preferAgentTools,
+          workspaceCwd: sessionWorkspaceCwd,
         });
         let contextRef: CcbSessionContext | undefined;
         const initialMessages = yield* Effect.tryPromise({
@@ -2463,7 +2650,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         const handle = yield* Effect.tryPromise({
           try: () =>
             bridge.createDpcodeCcbSession({
-              cwd: input.cwd ?? process.cwd(),
+              cwd: sessionWorkspaceCwd ?? process.cwd(),
               ...(input.modelSelection?.provider === PROVIDER ? { model: input.modelSelection.model } : {}),
               ...(input.providerOptions?.ccb?.fallbackModel
                 ? { fallbackModel: input.providerOptions.ccb.fallbackModel }
@@ -2638,7 +2825,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           provider: PROVIDER,
           status: "ready",
           runtimeMode: input.runtimeMode,
-          ...(input.cwd ? { cwd: input.cwd } : {}),
+          ...(sessionWorkspaceCwd ? { cwd: sessionWorkspaceCwd } : {}),
           ...(input.modelSelection?.provider === PROVIDER ? { model: input.modelSelection.model } : {}),
           threadId,
           resumeCursor: {
@@ -2687,9 +2874,9 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         });
         yield* emitSessionState(context, "ready");
 
-        if (bridge.listDpcodeCcbMcpStatus) {
+        if (bridge.listDpcodeCcbMcpStatus && sessionWorkspaceCwd) {
           const mcpStatus = yield* Effect.tryPromise({
-            try: () => bridge.listDpcodeCcbMcpStatus!(input.cwd ?? process.cwd()),
+            try: () => bridge.listDpcodeCcbMcpStatus!(sessionWorkspaceCwd),
             catch: (cause) =>
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -2897,6 +3084,46 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
           detail: `CCB adapter has no pending structured user input request: ${requestId} on ${threadId}`,
         }),
       );
+
+    const stopBackgroundTask: NonNullable<CcbAdapterShape["stopBackgroundTask"]> = (
+      threadId,
+      taskId,
+    ) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        if (!context.handle.stopBackgroundTask) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "task/stop",
+            detail: "CCB bridge does not support stopping background tasks.",
+          });
+        }
+        const result = yield* Effect.tryPromise({
+          try: () => context.handle.stopBackgroundTask!(taskId),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "task/stop",
+              detail: toMessage(cause, `Failed to stop CCB background task '${taskId}'.`),
+              cause,
+            }),
+        });
+        const stamp = yield* makeStamp();
+        yield* offer({
+          type: "task.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId,
+          ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+          createdAt: stamp.createdAt,
+          payload: {
+            taskId: RuntimeTaskId.makeUnsafe(taskId),
+            status: "stopped",
+            summary: result.command ? `Stopped ${result.command}` : "Background task stopped",
+          },
+          providerRefs: { providerThreadId: context.handle.sessionId },
+        });
+      });
 
     const stopSession: CcbAdapterShape["stopSession"] = (threadId) =>
       Effect.gen(function* () {
@@ -3147,14 +3374,17 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
         } satisfies ProviderListSkillsResult;
       });
 
-    const listAgents: NonNullable<CcbAdapterShape["listAgents"]> = () =>
+    const listAgents: NonNullable<CcbAdapterShape["listAgents"]> = (input) =>
       Effect.gen(function* () {
         const bridge = yield* loadBridgeModule();
         if (!bridge.listDpcodeCcbAgents) {
           return { agents: [], source: PROVIDER, cached: false } satisfies ProviderListAgentsResult;
         }
+        if (!input.cwd) {
+          return { agents: [], source: "empty", cached: false } satisfies ProviderListAgentsResult;
+        }
         const agents = yield* Effect.tryPromise({
-          try: () => bridge.listDpcodeCcbAgents!(process.cwd()),
+          try: () => bridge.listDpcodeCcbAgents!(input.cwd),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -3203,6 +3433,7 @@ function makeCcbAdapter(options?: CcbAdapterLiveOptions) {
       interruptTurn,
       respondToRequest,
       respondToUserInput,
+      stopBackgroundTask,
       stopSession,
       listSessions: () => Effect.sync(() => Array.from(sessions.values()).map((entry) => entry.session)),
       hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),

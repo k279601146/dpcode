@@ -4,7 +4,7 @@
 // Exports: provider discovery schemas and inferred types used by the WS/native API.
 
 import { Schema } from "effect";
-import { TrimmedNonEmptyString } from "./baseSchemas";
+import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 
 const ProviderDiscoveryKind = Schema.Literals(["ccb", "codex", "claudeAgent", "gemini", "opencode"]);
 
@@ -247,6 +247,8 @@ export type ProviderListModelsResult = typeof ProviderListModelsResult.Type;
 
 export const ProviderListAgentsInput = Schema.Struct({
   provider: ProviderDiscoveryKind,
+  cwd: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(ThreadId),
 });
 export type ProviderListAgentsInput = typeof ProviderListAgentsInput.Type;
 

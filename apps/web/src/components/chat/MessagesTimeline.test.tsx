@@ -973,7 +973,7 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain('data-timeline-row-kind="work"');
   });
 
-  it("shows the first four inline tool calls and collapses the remainder", async () => {
+  it("collapses completed inline tool calls by default", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1080,9 +1080,9 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Tool 1");
-    expect(markup).toContain("Tool 4");
-    expect(markup).toContain("+2 more tool calls");
+    expect(markup).toContain("Show previous 6 tool calls");
+    expect(markup).not.toContain("Tool 1");
+    expect(markup).not.toContain("Tool 4");
     expect(markup).not.toContain("Tool 5");
     expect(markup).not.toContain("Tool calls");
   });
@@ -1198,7 +1198,7 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Tool 2");
     expect(markup).toContain("Tool 3");
     expect(markup).toContain("Tool 6");
-    expect(markup).toContain("+2 more tool calls");
+    expect(markup).toContain("Show previous 2 tool calls");
   });
 
   it("attaches trailing tool rows to the last assistant reply after completion", async () => {
@@ -1428,7 +1428,7 @@ describe("MessagesTimeline", () => {
           ])
         }
         nowIso="2026-03-17T19:12:30.000Z"
-        expandedWorkGroups={{}}
+        expandedWorkGroups={{ "entry-inline-file-change": true }}
         onToggleWorkGroup={() => {}}
         onOpenTurnDiff={() => {}}
         revertTurnCountByUserMessageId={new Map()}
@@ -1499,6 +1499,54 @@ describe("MessagesTimeline", () => {
       `title="/bin/zsh -lc &#x27;rg -n &quot;ProjectionSnapshotQuery&quot; apps/server/src&#x27;"`,
     );
     expect(markup).not.toContain("&gt;/bin/zsh -lc");
+  });
+
+  it("keeps tool output collapsed behind the tool row", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        hasMessages
+        isWorking={false}
+        activeTurnInProgress={false}
+        activeTurnStartedAt={null}
+        timelineEntries={[
+          {
+            id: "entry-tool-output",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-tool-output",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Read package.json",
+              tone: "tool",
+              toolOutput: {
+                text: '{ "scripts": { "dev": "next dev" } }',
+                outputPath: "C:\\Temp\\read.output",
+              },
+            },
+          },
+        ]}
+        completionDividerBeforeEntryId={null}
+        completionSummary={null}
+        turnDiffSummaryByAssistantMessageId={new Map()}
+        nowIso="2026-03-17T19:12:30.000Z"
+        expandedWorkGroups={{}}
+        onToggleWorkGroup={() => {}}
+        onOpenTurnDiff={() => {}}
+        revertTurnCountByUserMessageId={new Map()}
+        onRevertUserMessage={() => {}}
+        isRevertingCheckpoint={false}
+        onImageExpand={() => {}}
+        markdownCwd={undefined}
+        resolvedTheme="light"
+        timestampFormat="locale"
+        workspaceRoot={undefined}
+      />,
+    );
+
+    expect(markup).toContain("Read package.json");
+    expect(markup).not.toContain("Output log");
+    expect(markup).not.toContain("&quot;dev&quot;: &quot;next dev&quot;");
   });
 
   it("shows a globe icon next to compact web-search rows", async () => {

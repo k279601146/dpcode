@@ -62,7 +62,8 @@ export const providerDiscoveryQueryKeys = {
     endpoint: string | null,
     apiKey: string | null,
   ) => ["provider-discovery", "models", provider, binaryPath, endpoint, apiKey] as const,
-  agents: (provider: ProviderKind) => ["provider-discovery", "agents", provider] as const,
+  agents: (provider: ProviderKind, cwd: string | null) =>
+    ["provider-discovery", "agents", provider, cwd] as const,
 };
 
 export function providerComposerCapabilitiesQueryOptions(provider: ProviderKind) {
@@ -157,12 +158,21 @@ export function providerModelsQueryOptions(input: {
   });
 }
 
-export function providerAgentsQueryOptions(input: { provider: ProviderKind; enabled?: boolean }) {
+export function providerAgentsQueryOptions(input: {
+  provider: ProviderKind;
+  cwd?: string | null;
+  threadId?: string | null;
+  enabled?: boolean;
+}) {
   return queryOptions({
-    queryKey: providerDiscoveryQueryKeys.agents(input.provider),
+    queryKey: providerDiscoveryQueryKeys.agents(input.provider, input.cwd ?? null),
     queryFn: async () => {
       const api = ensureNativeApi();
-      return api.provider.listAgents({ provider: input.provider });
+      return api.provider.listAgents({
+        provider: input.provider,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+      });
     },
     enabled: input.enabled ?? true,
     staleTime: 60_000,

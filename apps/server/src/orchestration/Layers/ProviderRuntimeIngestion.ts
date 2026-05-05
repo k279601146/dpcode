@@ -117,13 +117,37 @@ function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
-// Keep MCP progress payloads available to the web timeline so it can render the specific tool call.
+function copyBackgroundTaskFields(payload: {
+  backgroundTaskId?: string;
+  status?: string;
+  command?: string;
+  cwd?: string;
+  output?: string;
+  fullOutput?: string;
+  outputPath?: string;
+  urls?: ReadonlyArray<string>;
+}) {
+  return {
+    ...(payload.backgroundTaskId ? { backgroundTaskId: payload.backgroundTaskId } : {}),
+    ...(payload.status ? { status: payload.status } : {}),
+    ...(payload.command ? { command: payload.command } : {}),
+    ...(payload.cwd ? { cwd: payload.cwd } : {}),
+    ...(payload.output ? { output: truncateDetail(payload.output, 4_000) } : {}),
+    ...(payload.fullOutput ? { fullOutput: truncateDetail(payload.fullOutput, 12_000) } : {}),
+    ...(payload.outputPath ? { outputPath: payload.outputPath } : {}),
+    ...(payload.urls && payload.urls.length > 0 ? { urls: payload.urls } : {}),
+  };
+}
+
+// Keep progress payloads available to the web timeline so it can render the specific tool call.
 function buildToolProgressActivityPayload(
   event: Extract<ProviderRuntimeEvent, { type: "tool.progress" }>,
 ) {
+  const backgroundData = copyBackgroundTaskFields(event.payload);
+  const title = event.payload.backgroundTaskId ? "Background task" : "MCP tool call";
   return {
-    itemType: "mcp_tool_call" as const,
-    title: "MCP tool call",
+    itemType: event.payload.backgroundTaskId ? ("command_execution" as const) : ("mcp_tool_call" as const),
+    title,
     ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
     data: {
       ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
@@ -132,6 +156,7 @@ function buildToolProgressActivityPayload(
       ...(event.payload.elapsedSeconds !== undefined
         ? { elapsedSeconds: event.payload.elapsedSeconds }
         : {}),
+      ...backgroundData,
     },
   };
 }
@@ -559,6 +584,7 @@ function runtimeEventToActivities(
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
+            ...copyBackgroundTaskFields(event.payload),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -580,6 +606,7 @@ function runtimeEventToActivities(
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...copyBackgroundTaskFields(event.payload),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
