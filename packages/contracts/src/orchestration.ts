@@ -3,6 +3,7 @@ import {
   ClaudeModelOptions,
   CcbModelOptions,
   CodexModelOptions,
+  CursorModelOptions,
   GeminiModelOptions,
   OpenCodeModelOptions,
 } from "./model";
@@ -44,7 +45,13 @@ export const ORCHESTRATION_WS_CHANNELS = {
   threadEvent: "orchestration.threadEvent",
 } as const;
 
-export const ProviderKind = Schema.Literals(["ccb", "codex", "claudeAgent", "gemini", "opencode"]);
+export const ProviderKind = Schema.Literals([
+  "codex",
+  "claudeAgent",
+  "cursor",
+  "gemini",
+  "opencode",
+]);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -82,6 +89,13 @@ export const ClaudeModelSelection = Schema.Struct({
 });
 export type ClaudeModelSelection = typeof ClaudeModelSelection.Type;
 
+export const CursorModelSelection = Schema.Struct({
+  provider: Schema.Literal("cursor"),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(CursorModelOptions),
+});
+export type CursorModelSelection = typeof CursorModelSelection.Type;
+
 export const GeminiModelSelection = Schema.Struct({
   provider: Schema.Literal("gemini"),
   model: TrimmedNonEmptyString,
@@ -100,6 +114,7 @@ export const ModelSelection = Schema.Union([
   CcbModelSelection,
   CodexModelSelection,
   ClaudeModelSelection,
+  CursorModelSelection,
   GeminiModelSelection,
   OpenCodeModelSelection,
 ]);
@@ -140,6 +155,11 @@ export const GeminiProviderStartOptions = Schema.Struct({
   binaryPath: Schema.optional(TrimmedNonEmptyString),
 });
 
+export const CursorProviderStartOptions = Schema.Struct({
+  binaryPath: Schema.optional(TrimmedNonEmptyString),
+  apiEndpoint: Schema.optional(TrimmedNonEmptyString),
+});
+
 export const OpenCodeProviderStartOptions = Schema.Struct({
   binaryPath: Schema.optional(TrimmedNonEmptyString),
   serverUrl: Schema.optional(TrimmedNonEmptyString),
@@ -150,6 +170,7 @@ export const ProviderStartOptions = Schema.Struct({
   ccb: Schema.optional(CcbProviderStartOptions),
   codex: Schema.optional(CodexProviderStartOptions),
   claudeAgent: Schema.optional(ClaudeProviderStartOptions),
+  cursor: Schema.optional(CursorProviderStartOptions),
   gemini: Schema.optional(GeminiProviderStartOptions),
   opencode: Schema.optional(OpenCodeProviderStartOptions),
 });

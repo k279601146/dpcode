@@ -1042,6 +1042,7 @@ function mergeReadModelSessionWithLiveHotPath(
   if (
     previousSession.orchestrationStatus === "running" &&
     incomingSession.status !== "running" &&
+    incomingSession.status !== "error" &&
     previousSession.activeTurnId !== undefined
   ) {
     return {
@@ -1718,6 +1719,7 @@ function toLegacyProvider(providerName: string | null): ProviderKind {
     providerName === "ccb" ||
     providerName === "codex" ||
     providerName === "claudeAgent" ||
+    providerName === "cursor" ||
     providerName === "gemini" ||
     providerName === "opencode"
   ) {
@@ -2359,6 +2361,19 @@ function reconcileLatestTurnFromSession(
         thread.latestTurn?.turnId === session.activeTurnId
           ? thread.latestTurn.assistantMessageId
           : null,
+      sourceProposedPlan: thread.pendingSourceProposedPlan,
+    });
+  }
+
+  if (session.status === "error" && thread.latestTurn?.state === "running") {
+    return buildLatestTurn({
+      previous: thread.latestTurn,
+      turnId: thread.latestTurn.turnId,
+      state: "error",
+      requestedAt: thread.latestTurn.requestedAt,
+      startedAt: thread.latestTurn.startedAt,
+      completedAt: session.updatedAt,
+      assistantMessageId: thread.latestTurn.assistantMessageId,
       sourceProposedPlan: thread.pendingSourceProposedPlan,
     });
   }

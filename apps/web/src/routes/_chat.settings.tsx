@@ -26,7 +26,7 @@ import {
 } from "../appSettings";
 import { APP_VERSION } from "../branding";
 import { SidebarHeaderNavigationControls } from "../components/SidebarHeaderNavigationControls";
-import { ClaudeAI, Gemini, OpenAI, OpenCodeIcon } from "../components/Icons";
+import { ClaudeAI, CursorIcon, Gemini, OpenAI, OpenCodeIcon } from "../components/Icons";
 import { Button } from "../components/ui/button";
 import { Collapsible, CollapsibleContent } from "../components/ui/collapsible";
 import { Input } from "../components/ui/input";
@@ -121,6 +121,7 @@ const SIDEBAR_THREAD_SORT_ORDER_LABELS = {
 type InstallBinarySettingsKey =
   | "claudeBinaryPath"
   | "codexBinaryPath"
+  | "cursorBinaryPath"
   | "geminiBinaryPath"
   | "openCodeBinaryPath";
 type InstallProviderSettings = {
@@ -132,6 +133,9 @@ type InstallProviderSettings = {
   homePathKey?: "codexHomePath";
   homePlaceholder?: string;
   homeDescription?: ReactNode;
+  apiEndpointKey?: "cursorApiEndpoint";
+  apiEndpointPlaceholder?: string;
+  apiEndpointDescription?: ReactNode;
   serverUrlKey?: "openCodeServerUrl";
   serverUrlPlaceholder?: string;
   serverUrlDescription?: ReactNode;
@@ -165,6 +169,20 @@ const INSTALL_PROVIDER_SETTINGS: readonly InstallProviderSettings[] = [
         Leave blank to use <code>claude</code> from your PATH.
       </>
     ),
+  },
+  {
+    provider: "cursor",
+    title: "Cursor",
+    binaryPathKey: "cursorBinaryPath",
+    binaryPlaceholder: "Cursor Agent binary path",
+    binaryDescription: (
+      <>
+        Leave blank to use <code>agent</code> from your PATH.
+      </>
+    ),
+    apiEndpointKey: "cursorApiEndpoint",
+    apiEndpointPlaceholder: "https://api2.cursor.sh",
+    apiEndpointDescription: "Optional Cursor API endpoint override passed to `agent -e`.",
   },
   {
     provider: "gemini",
@@ -330,6 +348,7 @@ function SettingsRouteView() {
     ccb: false,
     codex: Boolean(settings.codexBinaryPath || settings.codexHomePath),
     claudeAgent: Boolean(settings.claudeBinaryPath),
+    cursor: Boolean(settings.cursorBinaryPath || settings.cursorApiEndpoint),
     gemini: Boolean(settings.geminiBinaryPath),
     opencode: Boolean(
       settings.openCodeBinaryPath || settings.openCodeServerUrl || settings.openCodeServerPassword,
@@ -343,6 +362,7 @@ function SettingsRouteView() {
     ccb: "",
     codex: "",
     claudeAgent: "",
+    cursor: "",
     gemini: "",
     opencode: "",
   });
@@ -360,6 +380,8 @@ function SettingsRouteView() {
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
   const claudeBinaryPath = settings.claudeBinaryPath;
+  const cursorBinaryPath = settings.cursorBinaryPath;
+  const cursorApiEndpoint = settings.cursorApiEndpoint;
   const geminiBinaryPath = settings.geminiBinaryPath;
   const openCodeBinaryPath = settings.openCodeBinaryPath;
   const openCodeServerUrl = settings.openCodeServerUrl;
@@ -418,6 +440,7 @@ function SettingsRouteView() {
     settings.customCcbModels.length +
     settings.customCodexModels.length +
     settings.customClaudeModels.length +
+    settings.customCursorModels.length +
     settings.customGeminiModels.length +
     settings.customOpenCodeModels.length;
   const savedCustomModelRows = MODEL_PROVIDER_SETTINGS.flatMap((providerSettings) =>
@@ -433,6 +456,8 @@ function SettingsRouteView() {
     : savedCustomModelRows.slice(0, 5);
   const isInstallSettingsDirty =
     settings.claudeBinaryPath !== defaults.claudeBinaryPath ||
+    settings.cursorBinaryPath !== defaults.cursorBinaryPath ||
+    settings.cursorApiEndpoint !== defaults.cursorApiEndpoint ||
     settings.geminiBinaryPath !== defaults.geminiBinaryPath ||
     settings.codexBinaryPath !== defaults.codexBinaryPath ||
     settings.codexHomePath !== defaults.codexHomePath ||
@@ -499,6 +524,7 @@ function SettingsRouteView() {
     ...(settings.customCcbModels.length > 0 ||
     settings.customCodexModels.length > 0 ||
     settings.customClaudeModels.length > 0 ||
+    settings.customCursorModels.length > 0 ||
     settings.customGeminiModels.length > 0 ||
     settings.customOpenCodeModels.length > 0
       ? ["Custom models"]
@@ -617,6 +643,7 @@ function SettingsRouteView() {
       ccb: false,
       codex: false,
       claudeAgent: false,
+      cursor: false,
       gemini: false,
       opencode: false,
     });
@@ -625,6 +652,7 @@ function SettingsRouteView() {
       ccb: "",
       codex: "",
       claudeAgent: "",
+      cursor: "",
       gemini: "",
       opencode: "",
     });
@@ -924,6 +952,7 @@ function SettingsRouteView() {
                     value !== "ccb" &&
                     value !== "codex" &&
                     value !== "claudeAgent" &&
+                    value !== "cursor" &&
                     value !== "gemini" &&
                     value !== "opencode"
                   ) {
@@ -938,6 +967,8 @@ function SettingsRouteView() {
                       {settings.defaultProvider === "ccb" ||
                       settings.defaultProvider === "claudeAgent" ? (
                         <ClaudeAI className="size-3.5 text-foreground" />
+                      ) : settings.defaultProvider === "cursor" ? (
+                        <CursorIcon className="size-3.5 text-foreground" />
                       ) : settings.defaultProvider === "gemini" ? (
                         <Gemini className="size-3.5 text-foreground" />
                       ) : settings.defaultProvider === "opencode" ? (
@@ -966,6 +997,12 @@ function SettingsRouteView() {
                     <span className="flex items-center gap-2">
                       <ClaudeAI className="size-3.5 text-foreground" />
                       Claude
+                    </span>
+                  </SelectItem>
+                  <SelectItem hideIndicator value="cursor">
+                    <span className="flex items-center gap-2">
+                      <CursorIcon className="size-3.5 text-foreground" />
+                      Cursor
                     </span>
                   </SelectItem>
                   <SelectItem hideIndicator value="gemini">
@@ -1905,6 +1942,7 @@ function SettingsRouteView() {
                       customCcbModels: defaults.customCcbModels,
                       customCodexModels: defaults.customCodexModels,
                       customClaudeModels: defaults.customClaudeModels,
+                      customCursorModels: defaults.customCursorModels,
                       customGeminiModels: defaults.customGeminiModels,
                       customOpenCodeModels: defaults.customOpenCodeModels,
                     });
@@ -1924,6 +1962,7 @@ function SettingsRouteView() {
                       value !== "ccb" &&
                       value !== "codex" &&
                       value !== "claudeAgent" &&
+                      value !== "cursor" &&
                       value !== "gemini" &&
                       value !== "opencode"
                     ) {
@@ -2328,6 +2367,8 @@ function SettingsRouteView() {
                       claudeBinaryPath: defaults.claudeBinaryPath,
                       codexBinaryPath: defaults.codexBinaryPath,
                       codexHomePath: defaults.codexHomePath,
+                      cursorBinaryPath: defaults.cursorBinaryPath,
+                      cursorApiEndpoint: defaults.cursorApiEndpoint,
                       geminiBinaryPath: defaults.geminiBinaryPath,
                       openCodeBinaryPath: defaults.openCodeBinaryPath,
                       openCodeServerUrl: defaults.openCodeServerUrl,
@@ -2337,6 +2378,7 @@ function SettingsRouteView() {
                       ccb: false,
                       codex: false,
                       claudeAgent: false,
+                      cursor: false,
                       gemini: false,
                       opencode: false,
                     });
@@ -2355,19 +2397,24 @@ function SettingsRouteView() {
                         settings.codexHomePath !== defaults.codexHomePath
                       : providerSettings.provider === "claudeAgent"
                         ? settings.claudeBinaryPath !== defaults.claudeBinaryPath
-                        : providerSettings.provider === "gemini"
-                          ? settings.geminiBinaryPath !== defaults.geminiBinaryPath
-                          : settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
-                            settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
-                            settings.openCodeServerPassword !== defaults.openCodeServerPassword;
+                        : providerSettings.provider === "cursor"
+                          ? settings.cursorBinaryPath !== defaults.cursorBinaryPath ||
+                            settings.cursorApiEndpoint !== defaults.cursorApiEndpoint
+                          : providerSettings.provider === "gemini"
+                            ? settings.geminiBinaryPath !== defaults.geminiBinaryPath
+                            : settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
+                              settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
+                              settings.openCodeServerPassword !== defaults.openCodeServerPassword;
                   const binaryPathValue =
                     providerSettings.binaryPathKey === "claudeBinaryPath"
                       ? claudeBinaryPath
-                      : providerSettings.binaryPathKey === "geminiBinaryPath"
-                        ? geminiBinaryPath
-                        : providerSettings.binaryPathKey === "openCodeBinaryPath"
-                          ? openCodeBinaryPath
-                          : codexBinaryPath;
+                      : providerSettings.binaryPathKey === "cursorBinaryPath"
+                        ? cursorBinaryPath
+                        : providerSettings.binaryPathKey === "geminiBinaryPath"
+                          ? geminiBinaryPath
+                          : providerSettings.binaryPathKey === "openCodeBinaryPath"
+                            ? openCodeBinaryPath
+                            : codexBinaryPath;
 
                   return (
                     <Collapsible
@@ -2423,11 +2470,13 @@ function SettingsRouteView() {
                                     updateSettings(
                                       providerSettings.binaryPathKey === "claudeBinaryPath"
                                         ? { claudeBinaryPath: event.target.value }
-                                        : providerSettings.binaryPathKey === "geminiBinaryPath"
-                                          ? { geminiBinaryPath: event.target.value }
-                                          : providerSettings.binaryPathKey === "openCodeBinaryPath"
-                                            ? { openCodeBinaryPath: event.target.value }
-                                            : { codexBinaryPath: event.target.value },
+                                        : providerSettings.binaryPathKey === "cursorBinaryPath"
+                                          ? { cursorBinaryPath: event.target.value }
+                                          : providerSettings.binaryPathKey === "geminiBinaryPath"
+                                            ? { geminiBinaryPath: event.target.value }
+                                            : providerSettings.binaryPathKey === "openCodeBinaryPath"
+                                              ? { openCodeBinaryPath: event.target.value }
+                                              : { codexBinaryPath: event.target.value },
                                     )
                                   }
                                   placeholder={providerSettings.binaryPlaceholder}
@@ -2461,6 +2510,34 @@ function SettingsRouteView() {
                                   {providerSettings.homeDescription ? (
                                     <span className="mt-1 block text-xs text-muted-foreground">
                                       {providerSettings.homeDescription}
+                                    </span>
+                                  ) : null}
+                                </label>
+                              ) : null}
+
+                              {providerSettings.apiEndpointKey ? (
+                                <label
+                                  htmlFor={`provider-install-${providerSettings.apiEndpointKey}`}
+                                  className="block"
+                                >
+                                  <span className="block text-xs font-medium text-foreground">
+                                    Cursor API endpoint
+                                  </span>
+                                  <Input
+                                    id={`provider-install-${providerSettings.apiEndpointKey}`}
+                                    className="mt-1"
+                                    value={cursorApiEndpoint}
+                                    onChange={(event) =>
+                                      updateSettings({
+                                        cursorApiEndpoint: event.target.value,
+                                      })
+                                    }
+                                    placeholder={providerSettings.apiEndpointPlaceholder}
+                                    spellCheck={false}
+                                  />
+                                  {providerSettings.apiEndpointDescription ? (
+                                    <span className="mt-1 block text-xs text-muted-foreground">
+                                      {providerSettings.apiEndpointDescription}
                                     </span>
                                   ) : null}
                                 </label>

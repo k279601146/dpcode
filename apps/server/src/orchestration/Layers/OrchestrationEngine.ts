@@ -22,6 +22,7 @@ import {
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
+import { normalizePersistedModelSelection } from "../../persistence/modelSelectionCompatibility.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
@@ -259,9 +260,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         defaultModelSelection:
           row.defaultModelSelectionJson === null
             ? null
-            : (JSON.parse(
-                row.defaultModelSelectionJson,
-              ) as OrchestrationReadModel["projects"][number]["defaultModelSelection"]),
+            : (normalizePersistedModelSelection(JSON.parse(row.defaultModelSelectionJson)) as
+                | OrchestrationReadModel["projects"][number]["defaultModelSelection"]
+                | null),
         scripts: JSON.parse(
           row.scriptsJson,
         ) as OrchestrationReadModel["projects"][number]["scripts"],
@@ -794,7 +795,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     dispatch,
     repairState,
     // Each access creates a fresh PubSub subscription so that multiple
-    // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
+    // consumers (Effect RPC, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.
     get streamDomainEvents(): OrchestrationEngineShape["streamDomainEvents"] {
       return Stream.fromPubSub(eventPubSub);

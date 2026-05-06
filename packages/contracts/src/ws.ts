@@ -61,8 +61,10 @@ import { FilesystemBrowseInput } from "./filesystem";
 import { OpenInEditorInput } from "./editor";
 import {
   ServerConfigUpdatedPayload,
+  ServerUpdateSettingsInput,
   ServerGetProviderUsageSnapshotInput,
   ServerProviderStatusesUpdatedPayload,
+  ServerSettingsUpdatedPayload,
   ServerVoiceTranscriptionInput,
 } from "./server";
 import {
@@ -125,11 +127,23 @@ export const WS_METHODS = {
 
   // Server meta
   serverGetConfig: "server.getConfig",
+  serverGetEnvironment: "server.getEnvironment",
+  serverGetSettings: "server.getSettings",
+  serverUpdateSettings: "server.updateSettings",
   serverRefreshProviders: "server.refreshProviders",
   serverListWorktrees: "server.listWorktrees",
   serverGetProviderUsageSnapshot: "server.getProviderUsageSnapshot",
   serverTranscribeVoice: "server.transcribeVoice",
   serverUpsertKeybinding: "server.upsertKeybinding",
+  subscribeServerLifecycle: "server.subscribeLifecycle",
+  subscribeServerConfig: "server.subscribeConfig",
+  subscribeServerProviderStatuses: "server.subscribeProviderStatuses",
+  subscribeServerSettings: "server.subscribeSettings",
+
+  // Streaming subscriptions
+  subscribeTerminalEvents: "terminal.subscribeEvents",
+  subscribeOrchestrationDomainEvents: "orchestration.subscribeDomainEvents",
+  subscribeGitActionProgress: "git.subscribeActionProgress",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -151,6 +165,7 @@ export const WS_CHANNELS = {
   serverWelcome: "server.welcome",
   serverConfigUpdated: "server.configUpdated",
   serverProviderStatusesUpdated: "server.providerStatusesUpdated",
+  serverSettingsUpdated: "server.settingsUpdated",
 } as const;
 
 // -- Tagged Union of all request body schemas ─────────────────────────
@@ -225,6 +240,9 @@ const WebSocketRequestBody = Schema.Union([
 
   // Server meta
   tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverGetEnvironment, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverGetSettings, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
   tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverListWorktrees, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverGetProviderUsageSnapshot, ServerGetProviderUsageSnapshotInput),
@@ -276,6 +294,7 @@ export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.serverWelcome]: WsWelcomePayload;
   readonly [WS_CHANNELS.serverConfigUpdated]: typeof ServerConfigUpdatedPayload.Type;
   readonly [WS_CHANNELS.serverProviderStatusesUpdated]: typeof ServerProviderStatusesUpdatedPayload.Type;
+  readonly [WS_CHANNELS.serverSettingsUpdated]: typeof ServerSettingsUpdatedPayload.Type;
   readonly [WS_CHANNELS.gitActionProgress]: typeof GitActionProgressEvent.Type;
   readonly [WS_CHANNELS.terminalEvent]: typeof TerminalEvent.Type;
   readonly [ORCHESTRATION_WS_CHANNELS.domainEvent]: OrchestrationEvent;
@@ -306,6 +325,10 @@ export const WsPushServerProviderStatusesUpdated = makeWsPushSchema(
   WS_CHANNELS.serverProviderStatusesUpdated,
   ServerProviderStatusesUpdatedPayload,
 );
+export const WsPushServerSettingsUpdated = makeWsPushSchema(
+  WS_CHANNELS.serverSettingsUpdated,
+  ServerSettingsUpdatedPayload,
+);
 export const WsPushGitActionProgress = makeWsPushSchema(
   WS_CHANNELS.gitActionProgress,
   GitActionProgressEvent,
@@ -329,6 +352,7 @@ export const WsPushChannelSchema = Schema.Literals([
   WS_CHANNELS.serverWelcome,
   WS_CHANNELS.serverConfigUpdated,
   WS_CHANNELS.serverProviderStatusesUpdated,
+  WS_CHANNELS.serverSettingsUpdated,
   WS_CHANNELS.terminalEvent,
   ORCHESTRATION_WS_CHANNELS.domainEvent,
   ORCHESTRATION_WS_CHANNELS.shellEvent,
@@ -340,6 +364,7 @@ export const WsPush = Schema.Union([
   WsPushServerWelcome,
   WsPushServerConfigUpdated,
   WsPushServerProviderStatusesUpdated,
+  WsPushServerSettingsUpdated,
   WsPushGitActionProgress,
   WsPushTerminalEvent,
   WsPushOrchestrationDomainEvent,

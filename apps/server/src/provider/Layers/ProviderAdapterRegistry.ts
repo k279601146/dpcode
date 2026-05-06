@@ -18,6 +18,7 @@ import {
 import { CcbAdapter } from "../Services/CcbAdapter.ts";
 import { ClaudeAdapter } from "../Services/ClaudeAdapter.ts";
 import { CodexAdapter } from "../Services/CodexAdapter.ts";
+import { CursorAdapter } from "../Services/CursorAdapter.ts";
 import { GeminiAdapter } from "../Services/GeminiAdapter.ts";
 import { OpenCodeAdapter } from "../Services/OpenCodeAdapter.ts";
 
@@ -31,9 +32,9 @@ const makeProviderAdapterRegistry = (options?: ProviderAdapterRegistryLiveOption
       options?.adapters !== undefined
         ? options.adapters
         : [
-            yield* CcbAdapter,
             yield* CodexAdapter,
             yield* ClaudeAdapter,
+            yield* CursorAdapter,
             yield* GeminiAdapter,
             yield* OpenCodeAdapter,
           ];

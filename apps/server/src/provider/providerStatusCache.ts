@@ -13,6 +13,7 @@ const PROVIDER_STATUS_CACHE_IDS = [
   "ccb",
   "codex",
   "claudeAgent",
+  "cursor",
   "gemini",
   "opencode",
 ] as const satisfies ReadonlyArray<ServerProviderStatus["provider"]>;

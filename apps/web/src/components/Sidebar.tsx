@@ -111,7 +111,7 @@ import { dispatchThreadRename } from "../lib/threadRename";
 import { quotePosixShellArgument } from "../lib/shellQuote";
 import { DEFAULT_THREAD_TERMINAL_ID, type SidebarThreadSummary, type Thread } from "../types";
 import { shouldRenderTerminalWorkspace } from "./ChatView.logic";
-import { ClaudeAI, Gemini, OpenAI, OpenCodeIcon } from "./Icons";
+import { ClaudeAI, CursorIcon, Gemini, OpenAI, OpenCodeIcon } from "./Icons";
 import { AppNavigationButtons } from "./AppNavigationButtons";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
 import { ThreadPinToggleButton } from "./ThreadPinToggleButton";
@@ -363,6 +363,9 @@ function ProviderGlyph({ provider, className }: { provider: ProviderKind; classN
   }
   if (provider === "gemini") {
     return <Gemini aria-hidden="true" className={cn("text-foreground", className)} />;
+  }
+  if (provider === "cursor") {
+    return <CursorIcon aria-hidden="true" className={cn("text-foreground", className)} />;
   }
   if (provider === "opencode") {
     return (
@@ -1147,6 +1150,7 @@ export default function Sidebar() {
   const activeSettingsSection = normalizeSettingsSection(settingsSectionSearch.section);
   const activeSplitView = useSplitViewStore(selectSplitView(routeSearch.splitViewId ?? null));
   const splitViewsById = useSplitViewStore((store) => store.splitViewsById);
+  const createSplitViewFromDrop = useSplitViewStore((store) => store.createFromDrop);
   const setSplitFocusedPane = useSplitViewStore((store) => store.setFocusedPane);
   const removeThreadFromSplitViews = useSplitViewStore((store) => store.removeThreadFromSplitViews);
   const { data: keybindings = EMPTY_KEYBINDINGS } = useQuery({
@@ -1352,101 +1356,6 @@ export default function Sidebar() {
       }),
     [terminalStateByThreadId, workspacePages],
   );
-  const threadGitTargets = useMemo(
-    () =>
-      sidebarDisplayThreads.map((thread) => ({
-        threadId: thread.id,
-        branch: thread.branch,
-        lastKnownPr: thread.lastKnownPr ?? null,
-        cwd: resolveThreadWorkspaceCwd({
-          projectCwd: projectCwdById.get(thread.projectId) ?? null,
-          envMode: thread.envMode,
-          worktreePath: thread.worktreePath,
-        }),
-      })),
-    [projectCwdById, sidebarDisplayThreads],
-  );
-  const threadGitStatusCwds = useMemo(
-    () => [
-      ...new Set(
-        threadGitTargets
-          .filter((target) => target.branch !== null)
-          .map((target) => target.cwd)
-          .filter((cwd): cwd is string => cwd !== null),
-      ),
-    ],
-    [threadGitTargets],
-  );
-  const threadGitStatusQueries = useQueries({
-    queries: threadGitStatusCwds.map((cwd) => ({
-      ...gitStatusQueryOptions(cwd),
-      staleTime: 30_000,
-      refetchInterval: 60_000,
-    })),
-  });
-  const threadStoredPrTargets = useMemo(
-    () =>
-      threadGitTargets.flatMap((target) =>
-        target.cwd !== null &&
-        target.lastKnownPr !== null &&
-        target.lastKnownPr.url.trim().length > 0
-          ? [{ ...target, cwd: target.cwd, lastKnownPr: target.lastKnownPr }]
-          : [],
-      ),
-    [threadGitTargets],
-  );
-  const threadStoredPrQueries = useQueries({
-    queries: threadStoredPrTargets.map((target) => ({
-      ...gitResolvePullRequestQueryOptions({
-        cwd: target.cwd,
-        reference: target.lastKnownPr.url,
-      }),
-      staleTime: 30_000,
-      refetchInterval: 60_000,
-    })),
-  });
-  const prByThreadId = useMemo(() => {
-    const statusByCwd = new Map<string, GitStatusResult>();
-    for (let index = 0; index < threadGitStatusCwds.length; index += 1) {
-      const cwd = threadGitStatusCwds[index];
-      if (!cwd) continue;
-      const status = threadGitStatusQueries[index]?.data;
-      if (status) {
-        statusByCwd.set(cwd, status);
-      }
-    }
-
-    const storedPrByThreadId = new Map<ThreadId, ThreadPr>();
-    for (let index = 0; index < threadStoredPrTargets.length; index += 1) {
-      const target = threadStoredPrTargets[index];
-      if (!target) {
-        continue;
-      }
-      const result = threadStoredPrQueries[index]?.data?.pullRequest ?? null;
-      if (result) {
-        storedPrByThreadId.set(target.threadId, toThreadPr(result));
-        continue;
-      }
-      storedPrByThreadId.set(target.threadId, toThreadPr(target.lastKnownPr));
-    }
-
-    const map = new Map<ThreadId, ThreadPr>();
-    for (const target of threadGitTargets) {
-      const status = target.cwd ? statusByCwd.get(target.cwd) : undefined;
-      const branchMatches =
-        target.branch !== null && status?.branch !== null && status?.branch === target.branch;
-      const livePr = branchMatches ? (status?.pr ?? null) : null;
-      map.set(target.threadId, livePr ?? storedPrByThreadId.get(target.threadId) ?? null);
-    }
-    return map;
-  }, [
-    threadGitStatusCwds,
-    threadGitStatusQueries,
-    threadGitTargets,
-    threadStoredPrQueries,
-    threadStoredPrTargets,
-  ]);
-
   const openPrLink = useCallback((event: React.MouseEvent<HTMLElement>, prUrl: string) => {
     event.preventDefault();
     event.stopPropagation();
@@ -2027,6 +1936,8 @@ export default function Sidebar() {
       const title =
         provider === "claudeAgent"
           ? `Imported Claude session${suffix ? ` ${suffix}` : ""}`
+          : provider === "cursor"
+            ? `Imported Cursor session${suffix ? ` ${suffix}` : ""}`
           : provider === "opencode"
             ? `Imported OpenCode session${suffix ? ` ${suffix}` : ""}`
             : `Imported Codex thread${suffix ? ` ${suffix}` : ""}`;
@@ -3048,6 +2959,14 @@ export default function Sidebar() {
     clearSelection,
     navigate,
     openChatThreadPage,
+    openSidechatSplit: ({ sourceThreadId, ownerProjectId, sidechatThreadId }) =>
+      createSplitViewFromDrop({
+        sourceThreadId,
+        ownerProjectId,
+        droppedThreadId: sidechatThreadId,
+        direction: "horizontal",
+        side: "second",
+      }),
     openTerminalThreadPage,
     prewarmThreadDetailForIntent,
     rememberLastThreadRouteNow,
@@ -3625,6 +3544,109 @@ export default function Sidebar() {
 
     return [...visibleThreadIdSet];
   }, [pinnedThreads, standardProjects, standardProjectSidebarDataById]);
+  const visibleSidebarThreadIdSet = useMemo(
+    () => new Set([...visibleSidebarThreadIds, ...visibleChatThreadIds]),
+    [visibleChatThreadIds, visibleSidebarThreadIds],
+  );
+  const visibleSidebarThreads = useMemo(
+    () => sidebarDisplayThreads.filter((thread) => visibleSidebarThreadIdSet.has(thread.id)),
+    [sidebarDisplayThreads, visibleSidebarThreadIdSet],
+  );
+  // PR badges only render on visible rows, so keep git/PR query setup off hidden project history.
+  const threadGitTargets = useMemo(
+    () =>
+      visibleSidebarThreads.map((thread) => ({
+        threadId: thread.id,
+        branch: thread.branch,
+        lastKnownPr: thread.lastKnownPr ?? null,
+        cwd: resolveThreadWorkspaceCwd({
+          projectCwd: projectCwdById.get(thread.projectId) ?? null,
+          envMode: thread.envMode,
+          worktreePath: thread.worktreePath,
+        }),
+      })),
+    [projectCwdById, visibleSidebarThreads],
+  );
+  const threadGitStatusCwds = useMemo(
+    () => [
+      ...new Set(
+        threadGitTargets
+          .filter((target) => target.branch !== null)
+          .map((target) => target.cwd)
+          .filter((cwd): cwd is string => cwd !== null),
+      ),
+    ],
+    [threadGitTargets],
+  );
+  const threadGitStatusQueries = useQueries({
+    queries: threadGitStatusCwds.map((cwd) => ({
+      ...gitStatusQueryOptions(cwd),
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    })),
+  });
+  const threadStoredPrTargets = useMemo(
+    () =>
+      threadGitTargets.flatMap((target) =>
+        target.cwd !== null &&
+        target.lastKnownPr !== null &&
+        target.lastKnownPr.url.trim().length > 0
+          ? [{ ...target, cwd: target.cwd, lastKnownPr: target.lastKnownPr }]
+          : [],
+      ),
+    [threadGitTargets],
+  );
+  const threadStoredPrQueries = useQueries({
+    queries: threadStoredPrTargets.map((target) => ({
+      ...gitResolvePullRequestQueryOptions({
+        cwd: target.cwd,
+        reference: target.lastKnownPr.url,
+      }),
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    })),
+  });
+  const prByThreadId = useMemo(() => {
+    const statusByCwd = new Map<string, GitStatusResult>();
+    for (let index = 0; index < threadGitStatusCwds.length; index += 1) {
+      const cwd = threadGitStatusCwds[index];
+      if (!cwd) continue;
+      const status = threadGitStatusQueries[index]?.data;
+      if (status) {
+        statusByCwd.set(cwd, status);
+      }
+    }
+
+    const storedPrByThreadId = new Map<ThreadId, ThreadPr>();
+    for (let index = 0; index < threadStoredPrTargets.length; index += 1) {
+      const target = threadStoredPrTargets[index];
+      if (!target) {
+        continue;
+      }
+      const result = threadStoredPrQueries[index]?.data?.pullRequest ?? null;
+      if (result) {
+        storedPrByThreadId.set(target.threadId, toThreadPr(result));
+        continue;
+      }
+      storedPrByThreadId.set(target.threadId, toThreadPr(target.lastKnownPr));
+    }
+
+    const map = new Map<ThreadId, ThreadPr>();
+    for (const target of threadGitTargets) {
+      const status = target.cwd ? statusByCwd.get(target.cwd) : undefined;
+      const branchMatches =
+        target.branch !== null && status?.branch !== null && status?.branch === target.branch;
+      const livePr = branchMatches ? (status?.pr ?? null) : null;
+      map.set(target.threadId, livePr ?? storedPrByThreadId.get(target.threadId) ?? null);
+    }
+    return map;
+  }, [
+    threadGitStatusCwds,
+    threadGitStatusQueries,
+    threadGitTargets,
+    threadStoredPrQueries,
+    threadStoredPrTargets,
+  ]);
   const isManualProjectSorting = appSettings.sidebarProjectSortOrder === "manual";
   const threadJumpCommandByThreadId = useMemo(() => {
     const mapping = new Map<ThreadId, NonNullable<ReturnType<typeof threadJumpCommandForIndex>>>();
@@ -4933,7 +4955,7 @@ export default function Sidebar() {
         id: "import-thread",
         label: "Import thread from...",
         description: "Attach a local thread to an existing provider session.",
-        keywords: ["import", "resume", "thread", "session", "codex", "claude", "opencode"],
+        keywords: ["import", "resume", "thread", "session", "codex", "claude", "cursor", "opencode"],
         shortcutLabel: importThreadShortcutLabel,
       },
       {
@@ -5850,14 +5872,14 @@ function SidebarSearchPaletteController(props: {
   const selectAllThreads = useMemo(() => createAllThreadsSelector(), []);
   const selectSidebarDisplayThreads = useMemo(() => createSidebarDisplayThreadsSelector(), []);
   const importProviderCapabilityQueries = useQueries({
-    queries: (["codex", "claudeAgent", "opencode"] as const).map((provider) =>
+    queries: (["codex", "claudeAgent", "cursor", "opencode"] as const).map((provider) =>
       providerComposerCapabilitiesQueryOptions(provider),
     ),
   });
   const threads = useStore(selectAllThreads);
   const sidebarDisplayThreads = useStore(selectSidebarDisplayThreads);
   const importProviders: ReadonlyArray<ImportProviderKind> = (
-    ["codex", "claudeAgent", "opencode"] as const
+    ["codex", "claudeAgent", "cursor", "opencode"] as const
   ).filter((provider, index) => supportsThreadImport(importProviderCapabilityQueries[index]?.data));
   const searchPaletteThreads = useMemo<SidebarSearchThread[]>(() => {
     const threadById = new Map(threads.map((thread) => [thread.id, thread] as const));

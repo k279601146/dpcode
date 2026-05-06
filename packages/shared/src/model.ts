@@ -6,6 +6,7 @@ import {
   type ClaudeModelOptions,
   type ClaudeCodeEffort,
   type CodexModelOptions,
+  type CursorModelOptions,
   type GeminiModelOptions,
   type GeminiThinkingBudget,
   type GeminiThinkingLevel,
@@ -21,6 +22,7 @@ const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> =
   ccb: new Set(MODEL_OPTIONS_BY_PROVIDER.ccb.map((option) => option.slug)),
   claudeAgent: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeAgent.map((option) => option.slug)),
   codex: new Set(MODEL_OPTIONS_BY_PROVIDER.codex.map((option) => option.slug)),
+  cursor: new Set(MODEL_OPTIONS_BY_PROVIDER.cursor.map((option) => option.slug)),
   gemini: new Set(MODEL_OPTIONS_BY_PROVIDER.gemini.map((option) => option.slug)),
   opencode: new Set(MODEL_OPTIONS_BY_PROVIDER.opencode.map((option) => option.slug)),
 };
@@ -463,6 +465,18 @@ export function normalizeOpenCodeModelOptions(
   const nextOptions: OpenCodeModelOptions = {
     ...(variant ? { variant } : {}),
     ...(agent ? { agent } : {}),
+  };
+  return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
+}
+
+export function normalizeCursorModelOptions(
+  modelOptions: CursorModelOptions | null | undefined,
+): CursorModelOptions | undefined {
+  const nextOptions: CursorModelOptions = {
+    ...(modelOptions?.reasoningEffort ? { reasoningEffort: modelOptions.reasoningEffort } : {}),
+    ...(modelOptions?.fastMode !== undefined ? { fastMode: modelOptions.fastMode } : {}),
+    ...(modelOptions?.thinking !== undefined ? { thinking: modelOptions.thinking } : {}),
+    ...(modelOptions?.contextWindow ? { contextWindow: modelOptions.contextWindow } : {}),
   };
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }
